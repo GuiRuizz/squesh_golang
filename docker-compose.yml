@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # Banco de Dados PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: squesh_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: squesh_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - squesh_network
+
+  # Aplicação Golang (Gin + GORM)
+  api:
+    build: .
+    container_name: squesh_api
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_USER=postgres
+      - DB_PASSWORD=postgrespassword
+      - DB_NAME=squesh_db
+      - DB_PORT=5432
+    depends_on:
+      - postgres
+    networks:
+      - squesh_network
+
+networks:
+  squesh_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
