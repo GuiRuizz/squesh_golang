@@ -2,8 +2,10 @@ package handler
 
 import (
 	"net/http"
+	"github.com/google/uuid"
 
 	"squesh_golang/internal/domain"
+	"squesh_golang/internal/dto"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -73,4 +75,39 @@ func (h *PostHandler) DeletePost(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusNoContent, nil)
+}
+
+func (h *PostHandler) CreatePost(c *gin.Context) {
+	var input dto.CreatePostDTO
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	parsedUserID, err := uuid.Parse(input.UserID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID de usuário inválido"})
+		return
+	}
+
+	// Valida se o usuário existe no banco
+	var user domain.User
+	if err := h.DB.First(&user, "id = ?", parsedUserID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Usuário não encontrado"})
+		return
+	}
+
+	post := domain.Post{
+		UserID:   parsedUserID,
+		ImageURL: input.ImageURL,
+		Caption:  input.Caption,
+	}
+
+	if result := h.DB.Create(&post); result.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao criar post: " + result.Error.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, post)
 }
