@@ -24,6 +24,8 @@ services:
     restart: always
     ports:
       - "8080:8080"
+    volumes:
+      - .:/app # <-- Mapeia os arquivos do seu PC para dentro do container
     environment:
       - DB_HOST=postgres
       - DB_USER=postgres

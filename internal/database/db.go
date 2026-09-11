@@ -28,10 +28,13 @@ func InitDB() *gorm.DB {
 		log.Fatalf("Erro ao conectar no banco via GORM: %v", err)
 	}
 
+	// O AutoMigrate adiciona tabelas e novas colunas (como role em User, Trail e TrailItem)
 	err = db.AutoMigrate(
 		&domain.User{},
 		&domain.Post{},
 		&domain.Comment{},
+		&domain.Trail{},
+		&domain.TrailItem{},
 	)
 	if err != nil {
 		log.Fatalf("Erro ao executar AutoMigrate: %v", err)

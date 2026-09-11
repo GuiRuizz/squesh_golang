@@ -12,9 +12,9 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 	r := gin.Default()
 	r.Use(middleware.CORSMiddleware())
 
-	postHandler := handler.NewPostHandler(db)
-	userHandler := handler.NewUserHandler(db)
 	authHandler := handler.NewAuthHandler(db)
+	postHandler := handler.NewPostHandler(db)
+	trailHandler := handler.NewTrailHandler(db)
 
 	v1 := r.Group("/api/v1")
 	{
@@ -24,17 +24,28 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 			auth.POST("/register", authHandler.Register)
 			auth.POST("/login", authHandler.Login)
 		}
-		v1.POST("/users", userHandler.CreateUser)
+
 		v1.GET("/posts", postHandler.GetFeed)
 
-		// Rotas Protegidas por JWT
+		// Leitura de Trilhas (Pública para todos verem)
+		v1.GET("/trails", trailHandler.ListTrails)
+		v1.GET("/trails/:id", trailHandler.GetTrailByID)
+
+		// Rotas Protegidas por Login
 		protected := v1.Group("")
 		protected.Use(middleware.AuthMiddleware())
 		{
 			protected.POST("/posts", postHandler.CreatePost)
 			protected.PUT("/posts/:id", postHandler.UpdatePostCaption)
 			protected.DELETE("/posts/:id", postHandler.DeletePost)
-			protected.GET("/users/:user_id/posts", postHandler.GetUserPosts)
+
+			// Rotas Exclusivas de ADMIN
+			admin := protected.Group("")
+			admin.Use(middleware.AdminMiddleware())
+			{
+				admin.POST("/trails", trailHandler.CreateTrail)
+				admin.POST("/trails/:id/items", trailHandler.AddItemToTrail)
+			}
 		}
 	}
 

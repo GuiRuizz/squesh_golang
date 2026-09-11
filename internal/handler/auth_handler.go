@@ -40,8 +40,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	// Gera o Token JWT para o ID do usuário
-	token, err := utils.GenerateToken(user.ID)
+	// Gera o Token JWT incluindo o ID e a Role do usuário
+	token, err := utils.GenerateToken(user.ID, user.Role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao gerar o token de acesso"})
 		return
@@ -53,6 +53,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			"id":    user.ID,
 			"name":  user.Name,
 			"email": user.Email,
+			"role":  user.Role,
 		},
 	})
 }
@@ -75,6 +76,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Name:     dto.Name,
 		Email:    dto.Email,
 		Password: string(hashedPassword),
+		Role:     "user", // Define a role padrão de criação
 	}
 
 	if err := h.DB.Create(&user).Error; err != nil {
@@ -82,8 +84,8 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	// Gera o token JWT para o novo usuário
-	token, err := utils.GenerateToken(user.ID)
+	// Gera o token JWT para o novo usuário incluindo a Role
+	token, err := utils.GenerateToken(user.ID, user.Role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao gerar o token"})
 		return
@@ -96,6 +98,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 			"id":    user.ID,
 			"name":  user.Name,
 			"email": user.Email,
+			"role":  user.Role,
 		},
 	})
 }

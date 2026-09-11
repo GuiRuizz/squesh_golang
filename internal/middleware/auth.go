@@ -32,8 +32,22 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Salva o ID do usuário no contexto para uso nos handlers
+		// Grava ID e Role no contexto do Gin
 		c.Set("userID", claims.UserID)
+		c.Set("userRole", claims.Role)
+		c.Next()
+	}
+}
+
+// AdminMiddleware bloqueia usuários que não sejam "admin"
+func AdminMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		role, exists := c.Get("userRole")
+		if !exists || role != "admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Acesso negado: Requer privilégios de Administrador"})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
