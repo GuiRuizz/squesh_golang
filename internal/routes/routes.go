@@ -15,6 +15,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 	authHandler := handler.NewAuthHandler(db)
 	postHandler := handler.NewPostHandler(db)
 	trailHandler := handler.NewTrailHandler(db)
+	userHandler := handler.NewUserHandler(db)
 
 	v1 := r.Group("/api/v1")
 	{
@@ -35,6 +36,8 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		protected := v1.Group("")
 		protected.Use(middleware.AuthMiddleware())
 		{
+			protected.GET("/users/me", userHandler.GetProfile)
+
 			protected.POST("/posts", postHandler.CreatePost)
 			protected.PUT("/posts/:id", postHandler.UpdatePostCaption)
 			protected.DELETE("/posts/:id", postHandler.DeletePost)
