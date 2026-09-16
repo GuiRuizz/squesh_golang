@@ -39,6 +39,8 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 			// Rotas de Usuário
 			protected.GET("/users/me", userHandler.GetProfile)
 			protected.GET("/users/ranking", userHandler.GetRanking)
+			protected.PUT("/users/me", userHandler.UpdateProfile) 
+			protected.PATCH("/users/me/password", userHandler.UpdatePassword)
 
 			// Rotas de Postagens
 			protected.POST("/posts", postHandler.CreatePost)

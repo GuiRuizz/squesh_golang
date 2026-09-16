@@ -7,6 +7,7 @@ import (
 
 	"squesh_golang/internal/domain"
 	"squesh_golang/internal/dto"
+	"squesh_golang/internal/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -154,4 +155,104 @@ func (h *UserHandler) GetRanking(c *gin.Context) {
 		"data":  ranking,
 		"total": len(ranking),
 	})
+}
+
+// UpdateProfile atualiza os dados básicos do usuário logado (Nome e Avatar)
+func (h *UserHandler) UpdateProfile(c *gin.Context) {
+	userIDCtx, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Não autorizado"})
+		return
+	}
+
+	userID, ok := userIDCtx.(uuid.UUID)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de usuário inválido no contexto"})
+		return
+	}
+
+	var input dto.UpdateProfileDTO
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var user domain.User
+	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Usuário não encontrado"})
+		return
+	}
+
+	// Atualiza apenas os campos permitidos
+	user.Name = input.Name
+	user.AvatarURL = input.AvatarURL
+
+	if err := h.DB.Save(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao atualizar dados do usuário"})
+		return
+	}
+
+	streak := h.calculateStreak(user.ID)
+
+	response := dto.UserProfileResponseDTO{
+		ID:        user.ID,
+		Name:      user.Name,
+		Email:     user.Email,
+		Role:      user.Role,
+		AvatarURL: user.AvatarURL,
+		Streak:    streak,
+		CreatedAt: user.CreatedAt,
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// UpdatePassword realiza a troca de senha com verificação da senha atual
+func (h *UserHandler) UpdatePassword(c *gin.Context) {
+	userIDCtx, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Não autorizado"})
+		return
+	}
+
+	userID, ok := userIDCtx.(uuid.UUID)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de usuário inválido no contexto"})
+		return
+	}
+
+	var input dto.UpdatePasswordDTO
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var user domain.User
+	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Usuário não encontrado"})
+		return
+	}
+
+	// Valida se a senha atual informada bate com a salva no banco
+	// (Assumindo que você usa utils.CheckPasswordHash com bcrypt)
+	if !utils.CheckPasswordHash(input.CurrentPassword, user.Password) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "A senha atual está incorreta"})
+		return
+	}
+
+	// Gera o hash da nova senha
+	hashedPassword, err := utils.HashPassword(input.NewPassword)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao processar nova senha"})
+		return
+	}
+
+	user.Password = hashedPassword
+
+	if err := h.DB.Save(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao salvar nova senha"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Senha alterada com sucesso"})
 }
