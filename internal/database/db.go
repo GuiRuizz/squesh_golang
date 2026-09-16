@@ -35,6 +35,8 @@ func InitDB() *gorm.DB {
 		&domain.Comment{},
 		&domain.Trail{},
 		&domain.TrailItem{},
+		&domain.ShopItem{},
+		&domain.UserInventory{},
 	)
 	if err != nil {
 		log.Fatalf("Erro ao executar AutoMigrate: %v", err)

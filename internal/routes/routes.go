@@ -16,6 +16,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 	postHandler := handler.NewPostHandler(db)
 	trailHandler := handler.NewTrailHandler(db)
 	userHandler := handler.NewUserHandler(db)
+	shopHandler := handler.NewShopHandler(db)
 
 	v1 := r.Group("/api/v1")
 	{
@@ -32,6 +33,26 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		v1.GET("/trails", trailHandler.ListTrails)
 		v1.GET("/trails/:id", trailHandler.GetTrailByID)
 
+		shopGroup := v1.Group("/shop")
+		{
+			// Rotas Públicas (Leitura do catálogo)
+			shopGroup.GET("", shopHandler.GetItems)        // Listar catálogo com suporte a busca/paginação
+			shopGroup.GET("/:id", shopHandler.GetItemByID) // Buscar item específico por ID
+
+			// Rotas de Admin (Para criar, atualizar e deletar itens)
+			// Se você tiver um middleware de admin, adicione aqui (ex: middleware.AdminOnly())
+			shopGroup.POST("", shopHandler.CreateItem)
+			shopGroup.PUT("/:id", shopHandler.UpdateItem)
+			shopGroup.DELETE("/:id", shopHandler.DeleteItem)
+
+			// Rotas Protegidas (Exigem usuário autenticado via JWT)
+			protected := shopGroup.Use(middleware.AuthMiddleware())
+			{
+				protected.POST("/buy", shopHandler.BuyItem)               // Realizar a compra de um item
+				protected.GET("/inventory", shopHandler.GetUserInventory) // Listar inventário do usuário logado
+			}
+		}
+
 		// Rotas Protegidas por Login
 		protected := v1.Group("")
 		protected.Use(middleware.AuthMiddleware())
@@ -39,7 +60,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 			// Rotas de Usuário
 			protected.GET("/users/me", userHandler.GetProfile)
 			protected.GET("/users/ranking", userHandler.GetRanking)
-			protected.PUT("/users/me", userHandler.UpdateProfile) 
+			protected.PUT("/users/me", userHandler.UpdateProfile)
 			protected.PATCH("/users/me/password", userHandler.UpdatePassword)
 
 			// Rotas de Postagens
