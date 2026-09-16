@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -27,6 +28,8 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Não autorizado"})
 		return
 	}
+
+	fmt.Println("UserID from context:", userIDCtx)
 
 	// Type assertion direto para uuid.UUID
 	userID, ok := userIDCtx.(uuid.UUID)
@@ -103,4 +106,52 @@ func (h *UserHandler) calculateStreak(userID uuid.UUID) int {
 	}
 
 	return streak
+}
+
+// GetRanking retorna a lista de usuários ordenada pelo maior streak
+func (h *UserHandler) GetRanking(c *gin.Context) {
+	var users []domain.User
+
+	// Busca todos os usuários do banco
+	if err := h.DB.Find(&users).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao buscar usuários para o ranking"})
+		return
+	}
+
+	// Lista para armazenar o ranking calculado
+	var ranking []dto.UserRankingDTO
+
+	for _, user := range users {
+		streak := h.calculateStreak(user.ID)
+
+		// Opcional: Descomente a linha abaixo se quiser exibir apenas usuários com streak > 0
+		// if streak == 0 { continue }
+
+		ranking = append(ranking, dto.UserRankingDTO{
+			ID:        user.ID,
+			Name:      user.Name,
+			AvatarURL: user.AvatarURL,
+			Streak:    streak,
+		})
+	}
+
+	// Ordena a lista do maior para o menor streak
+	// Em caso de empate no streak, mantemos a ordem atual ou podemos ordenar por nome
+	for i := 0; i < len(ranking); i++ {
+		for j := i + 1; j < len(ranking); j++ {
+			if ranking[j].Streak > ranking[i].Streak {
+				ranking[i], ranking[j] = ranking[j], ranking[i]
+			}
+		}
+	}
+
+	// Atribui as posições (1º, 2º, 3º...) após a ordenação
+	for i := range ranking {
+		ranking[i].Position = i + 1
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":  ranking,
+		"total": len(ranking),
+	})
 }

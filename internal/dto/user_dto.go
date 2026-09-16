@@ -15,3 +15,11 @@ type UserProfileResponseDTO struct {
 	Streak    int       `json:"streak"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+type UserRankingDTO struct {
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	AvatarURL string    `json:"avatar_url,omitempty"`
+	Streak    int       `json:"streak"`
+	Position  int       `json:"position"`
+}
