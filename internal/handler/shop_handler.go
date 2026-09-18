@@ -1,12 +1,14 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"squesh_golang/internal/domain"
 	"squesh_golang/internal/dto"
+	"squesh_golang/internal/service"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -14,11 +16,15 @@ import (
 )
 
 type ShopHandler struct {
-	DB *gorm.DB
+	DB                  *gorm.DB
+	NotificationService *service.NotificationService
 }
 
-func NewShopHandler(db *gorm.DB) *ShopHandler {
-	return &ShopHandler{DB: db}
+func NewShopHandler(db *gorm.DB, notifService *service.NotificationService) *ShopHandler {
+	return &ShopHandler{
+		DB:                  db,
+		NotificationService: notifService,
+	}
 }
 
 // CREATE: Criar um novo item na loja (Admin)
@@ -61,39 +67,32 @@ func (h *ShopHandler) ListItems(c *gin.Context) {
 
 // GetItems lista itens da loja com busca por nome e paginação
 func (h *ShopHandler) GetItems(c *gin.Context) {
-	// 1. Captura os Query Parameters da URL
-	searchQuery := c.Query("search") // Ex: /shop?search=neon
+	searchQuery := c.Query("search")
 	pageStr := c.DefaultQuery("page", "1")
 	limitStr := c.DefaultQuery("limit", "10")
 
-	// 2. Converte page e limit para inteiros com valores padrão
 	page, err := strconv.Atoi(pageStr)
 	if err != nil || page < 1 {
 		page = 1
 	}
 
 	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit < 1 || limit > 100 { // Limite máximo de 100 por segurança
+	if err != nil || limit < 1 || limit > 100 {
 		limit = 10
 	}
 
-	// 3. Monta a query base (apenas itens ativos)
 	query := h.DB.Model(&domain.ShopItem{}).Where("is_active = ?", true)
 
-	// 4. Aplica o filtro de busca por nome (case-insensitive) se fornecido
 	if strings.TrimSpace(searchQuery) != "" {
-		// PostgreSQL suporta ILIKE. Para MySQL/SQLite padrão, use LIKE com LOWER():
 		query = query.Where("LOWER(name) LIKE ?", "%"+strings.ToLower(searchQuery)+"%")
 	}
 
-	// 5. Conta o total de registros que satisfazem a busca (para metadados da paginação)
 	var totalRecords int64
 	if err := query.Count(&totalRecords).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao contar total de itens"})
 		return
 	}
 
-	// 6. Aplica o Offset e Limit na consulta principal
 	offset := (page - 1) * limit
 	var items []domain.ShopItem
 
@@ -102,10 +101,8 @@ func (h *ShopHandler) GetItems(c *gin.Context) {
 		return
 	}
 
-	// 7. Calcula o total de páginas
 	totalPages := int((totalRecords + int64(limit) - 1) / int64(limit))
 
-	// 8. Retorna a resposta paginada
 	c.JSON(http.StatusOK, gin.H{
 		"data": items,
 		"meta": gin.H{
@@ -180,7 +177,7 @@ func (h *ShopHandler) UpdateItem(c *gin.Context) {
 	c.JSON(http.StatusOK, item)
 }
 
-// DELETE: Remover um item (Soft Delete / Desativação ou Hard Delete) (Admin)
+// DELETE: Remover um item (Admin)
 func (h *ShopHandler) DeleteItem(c *gin.Context) {
 	idParam := c.Param("id")
 	itemID, err := uuid.Parse(idParam)
@@ -203,7 +200,7 @@ func (h *ShopHandler) DeleteItem(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Item removido com sucesso"})
 }
 
-// BUY: Compra de um item
+// BUY: Compra de um item com Notificação Automática
 func (h *ShopHandler) BuyItem(c *gin.Context) {
 	userIDCtx, exists := c.Get("userID")
 	if !exists {
@@ -242,6 +239,14 @@ func (h *ShopHandler) BuyItem(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao processar compra"})
 		return
 	}
+
+	// Notificação enviada em background/pós-compra sem travar a resposta se der erro leve
+	_ = h.NotificationService.CreateNotification(
+		userID,
+		"Compra Realizada!",
+		fmt.Sprintf("Você adquiriu o item '%s' com sucesso.", item.Name),
+		"shop",
+	)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Item adquirido com sucesso!"})
 }

@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"squesh_golang/internal/domain"
 	"squesh_golang/internal/dto"
@@ -108,4 +110,71 @@ func (h *TrailHandler) AddItemToTrail(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, item)
+}
+
+// GenerateNextTrailBlock gera os próximos N itens de uma trilha específica
+func GenerateNextTrailBlock(db *gorm.DB, trailID uuid.UUID, amount int) ([]domain.TrailItem, error) {
+	var lastItem domain.TrailItem
+
+	// 1. Busca o último item cadastrado na trilha para continuar a sequência do campo Order
+	err := db.Where("trail_id = ?", trailID).Order("order DESC").First(&lastItem).Error
+	nextOrder := 1
+	if err == nil {
+		nextOrder = lastItem.Order + 1
+	}
+
+	var newItems []domain.TrailItem
+
+	// 2. Cria os novos itens respeitando os campos da struct TrailItem
+	for i := 0; i < amount; i++ {
+		item := domain.TrailItem{
+			TrailID:     trailID,
+			Order:       nextOrder,
+			Title:       fmt.Sprintf("Etapa %d", nextOrder),
+			Description: fmt.Sprintf("Meta gerada automaticamente para a sequência #%d da sua jornada.", nextOrder),
+			Value:       fmt.Sprintf("%d repetições / meta diária", 10+(nextOrder%5)*5), // Exemplo de valor dinâmico
+		}
+		newItems = append(newItems, item)
+		nextOrder++
+	}
+
+	// 3. Salva os novos registros em lote
+	if err := db.Create(&newItems).Error; err != nil {
+		return nil, err
+	}
+
+	return newItems, nil
+}
+
+// GenerateInfiniteItems é a rota que expõe a criação sob demanda
+func (h *TrailHandler) GenerateInfiniteItems(c *gin.Context) {
+	trailIDParam := c.Param("id")
+	trailID, err := uuid.Parse(trailIDParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID da trilha em formato inválido"})
+		return
+	}
+
+	amountStr := c.DefaultQuery("amount", "5")
+	amount, err := strconv.Atoi(amountStr)
+	if err != nil || amount < 1 || amount > 50 {
+		amount = 5
+	}
+
+	var trail domain.Trail
+	if err := h.DB.First(&trail, "id = ?", trailID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trilha não encontrada"})
+		return
+	}
+
+	newItems, err := GenerateNextTrailBlock(h.DB, trail.ID, amount)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao gerar novos itens para a trilha"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message": fmt.Sprintf("%d novos itens gerados com sucesso", len(newItems)),
+		"data":    newItems,
+	})
 }

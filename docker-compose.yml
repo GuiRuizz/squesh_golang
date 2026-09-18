@@ -14,6 +14,11 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d squesh_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
     networks:
       - squesh_network
 
@@ -25,7 +30,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - .:/app # <-- Mapeia os arquivos do seu PC para dentro do container
+      - .:/app # Mapeia os arquivos locais para dentro do container
     environment:
       - DB_HOST=postgres
       - DB_USER=postgres
@@ -33,7 +38,8 @@ services:
       - DB_NAME=squesh_db
       - DB_PORT=5432
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy # Aguarda o PostgreSQL estar totalmente pronto
     networks:
       - squesh_network
 

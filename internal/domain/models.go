@@ -11,5 +11,6 @@ func GetModels() []interface{} {
 		&TrailItem{},
 		&ShopItem{},
 		&UserInventory{},
+		&Notification{},
 	}
 }
