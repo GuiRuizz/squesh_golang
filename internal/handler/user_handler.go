@@ -256,3 +256,33 @@ func (h *UserHandler) UpdatePassword(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Senha alterada com sucesso"})
 }
+
+// GetStreak retorna apenas as informações referentes à ofensiva (streak) do usuário logado
+func (h *UserHandler) GetStreak(c *gin.Context) {
+	userIDCtx, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Não autorizado"})
+		return
+	}
+
+	userID, ok := userIDCtx.(uuid.UUID)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de usuário inválido no contexto"})
+		return
+	}
+
+	// Valida se o usuário existe no banco
+	var user domain.User
+	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Usuário não encontrado"})
+		return
+	}
+
+	// Executa o cálculo baseado nas postagens
+	streak := h.calculateStreak(user.ID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"user_id": user.ID,
+		"streak":  streak,
+	})
+}

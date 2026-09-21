@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"squesh_golang/internal/domain"
 	"squesh_golang/internal/dto"
@@ -176,5 +177,211 @@ func (h *TrailHandler) GenerateInfiniteItems(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"message": fmt.Sprintf("%d novos itens gerados com sucesso", len(newItems)),
 		"data":    newItems,
+	})
+}
+
+// CompleteTrailItem marca um item como concluído, atualiza a streak e adiciona pontos ao usuário
+func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
+	// 1. Obtém userID do contexto (gerado pelo AuthMiddleware)
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
+		return
+	}
+
+	var userID uuid.UUID
+	var err error
+
+	switch v := userIDVal.(type) {
+	case uuid.UUID:
+		userID = v
+	case string:
+		userID, err = uuid.Parse(v)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "ID de usuário no token é inválido"})
+			return
+		}
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Formato de userID inválido"})
+		return
+	}
+
+	// 2. Extrai e valida o itemId da URL
+	itemIDParam := c.Param("itemId")
+	itemID, err := uuid.Parse(itemIDParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID do item em formato inválido"})
+		return
+	}
+
+	var updatedUser domain.User
+
+	// 3. Executa as validações e gravações dentro de uma Transação do Banco
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		// Valida se o item da trilha realmente existe
+		var item domain.TrailItem
+		if err := tx.First(&item, "id = ?", itemID).Error; err != nil {
+			return fmt.Errorf("item da trilha não encontrado")
+		}
+
+		// Verifica se o usuário já concluiu esse item
+		var count int64
+		tx.Model(&domain.UserTrailProgress{}).
+			Where("user_id = ? AND trail_item_id = ?", userID, itemID).
+			Count(&count)
+
+		if count > 0 {
+			return fmt.Errorf("este item já foi concluído anteriormente")
+		}
+
+		// Registra a conclusão na tabela de progresso
+		progress := domain.UserTrailProgress{
+			UserID:      userID,
+			TrailItemID: itemID,
+			CompletedAt: time.Now(),
+		}
+		if err := tx.Create(&progress).Error; err != nil {
+			return err
+		}
+
+		// Busca os dados atuais do usuário com Lock (FOR UPDATE) para evitar race conditions
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&updatedUser, "id = ?", userID).Error; err != nil {
+			return err
+		}
+
+		// Lógica de cálculo da Streak diária
+		now := time.Now()
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+		if updatedUser.LastActiveDate == nil {
+			// Primeira conclusão registrada no app
+			updatedUser.StreakCount = 1
+		} else {
+			lastActive := *updatedUser.LastActiveDate
+			lastActiveDay := time.Date(lastActive.Year(), lastActive.Month(), lastActive.Day(), 0, 0, 0, 0, lastActive.Location())
+
+			daysDiff := int(today.Sub(lastActiveDay).Hours() / 24)
+
+			switch {
+			case daysDiff == 1:
+				// Atividade no dia consecutivo -> Incrementa Streak
+				updatedUser.StreakCount++
+			case daysDiff > 1:
+				// Quebra na sequência de dias -> Reseta para 1
+				updatedUser.StreakCount = 1
+				// daysDiff == 0 -> Já completou algum item hoje, mantém a streak igual
+			}
+		}
+
+		// Atualiza o LastActiveDate e pontuação
+		updatedUser.LastActiveDate = &now
+		updatedUser.Points += 10
+
+		if err := tx.Save(&updatedUser).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 4. Retorna a resposta ao frontend
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "Item concluído com sucesso!",
+		"streak_count": updatedUser.StreakCount,
+		"points":       updatedUser.Points,
+	})
+}
+
+// ToggleMealCheck alterna o status de conclusão de uma refeição/item de nutrição
+func (h *TrailHandler) ToggleMealCheck(c *gin.Context) {
+	userIDVal, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
+		return
+	}
+
+	var userID uuid.UUID
+	switch v := userIDVal.(type) {
+	case uuid.UUID:
+		userID = v
+	case string:
+		parsedID, err := uuid.Parse(v)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "ID de usuário inválido"})
+			return
+		}
+		userID = parsedID
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Formato de userID inválido"})
+		return
+	}
+
+	itemIDParam := c.Param("mealId")
+	itemID, err := uuid.Parse(itemIDParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID do item inválido"})
+		return
+	}
+
+	var isChecked bool
+
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		// Busca o item juntamente com a trilha pai para validar o tipo
+		var item domain.TrailItem
+		if err := tx.Preload("Trail").First(&item, "id = ?", itemID).Error; err != nil {
+			return fmt.Errorf("item não encontrado")
+		}
+
+		// Verifica se o item pertence a uma trilha de nutrição
+		var trail domain.Trail
+		if err := tx.First(&trail, "id = ?", item.TrailID).Error; err != nil {
+			return fmt.Errorf("trilha associada não encontrada")
+		}
+
+		if trail.Type != domain.TrailTypeNutrition {
+			return fmt.Errorf("o item informado não pertence a uma trilha de nutrição")
+		}
+
+		// Verifica se já existe o registro de conclusão
+		var progress domain.UserTrailProgress
+		err := tx.Where("user_id = ? AND trail_item_id = ?", userID, itemID).First(&progress).Error
+
+		if err == nil {
+			// Já existe -> desmarca (deleta o registro)
+			if err := tx.Delete(&progress).Error; err != nil {
+				return err
+			}
+			isChecked = false
+		} else if err == gorm.ErrRecordNotFound {
+			// Não existe -> marca como concluído
+			newProgress := domain.UserTrailProgress{
+				UserID:      userID,
+				TrailItemID: itemID,
+				CompletedAt: time.Now(),
+			}
+			if err := tx.Create(&newProgress).Error; err != nil {
+				return err
+			}
+			isChecked = true
+		} else {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Status da refeição alterado com sucesso",
+		"checked": isChecked,
 	})
 }

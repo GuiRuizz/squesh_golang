@@ -22,7 +22,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 	trailHandler := handler.NewTrailHandler(db)
 	userHandler := handler.NewUserHandler(db)
 	shopHandler := handler.NewShopHandler(db, notifService)
-	notificationHandler := handler.NewNotificationHandler(db) // Instanciando o Handler
+	notificationHandler := handler.NewNotificationHandler(db)
 
 	v1 := r.Group("/api/v1")
 	{
@@ -54,25 +54,37 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 			// Central de Notificações
 			notifications := protected.Group("/notifications")
 			{
-				notifications.GET("", notificationHandler.GetUserNotifications)       // GET /api/v1/notifications
-				notifications.PATCH("/:id/read", notificationHandler.MarkAsRead)     // PATCH /api/v1/notifications/:id/read
-				notifications.PATCH("/read-all", notificationHandler.MarkAllAsRead)  // PATCH /api/v1/notifications/read-all
-				notifications.PATCH("/:id/unread", notificationHandler.MarkAsUnread) // PATCH /api/v1/notifications/:id/unread
+				notifications.GET("", notificationHandler.GetUserNotifications)
+				notifications.PATCH("/:id/read", notificationHandler.MarkAsRead)
+				notifications.PATCH("/read-all", notificationHandler.MarkAllAsRead)
+				notifications.PATCH("/:id/unread", notificationHandler.MarkAsUnread)
 			}
 
-			// Trilhas
-			protected.POST("/trails/:id/generate", trailHandler.GenerateInfiniteItems)
+			// Trilhas & Progresso
+			trails := protected.Group("/trails")
+			{
+				trails.POST("/:id/generate", trailHandler.GenerateInfiniteItems)
+				trails.POST("/items/:itemId/complete", trailHandler.CompleteTrailItem)        // <--- Novo
+				trails.PATCH("/items/:itemId/meals/:mealIndex", trailHandler.ToggleMealCheck) // <--- Novo
+			}
 
-			// Usuários
-			protected.GET("/users/me", userHandler.GetProfile)
-			protected.GET("/users/ranking", userHandler.GetRanking)
-			protected.PUT("/users/me", userHandler.UpdateProfile)
-			protected.PATCH("/users/me/password", userHandler.UpdatePassword)
+			// Usuários & Profile
+			users := protected.Group("/users")
+			{
+				users.GET("/me", userHandler.GetProfile)
+				users.GET("/me/streak", userHandler.GetStreak) // <--- Novo
+				users.GET("/ranking", userHandler.GetRanking)
+				users.PUT("/me", userHandler.UpdateProfile)
+				users.PATCH("/me/password", userHandler.UpdatePassword)
+			}
 
 			// Postagens
-			protected.POST("/posts", postHandler.CreatePost)
-			protected.PUT("/posts/:id", postHandler.UpdatePostCaption)
-			protected.DELETE("/posts/:id", postHandler.DeletePost)
+			posts := protected.Group("/posts")
+			{
+				posts.POST("", postHandler.CreatePost)
+				posts.PUT("/:id", postHandler.UpdatePostCaption)
+				posts.DELETE("/:id", postHandler.DeletePost)
+			}
 
 			// Rotas Exclusivas de ADMIN
 			admin := protected.Group("")
