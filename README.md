@@ -85,6 +85,8 @@ As configurações de ambiente são definidas no arquivo `.env`:
 | `DB_NAME` | Nome do banco de dados | `squesh_db` |
 | `DB_PORT` | Porta do banco de dados | `5432` |
 | `JWT_SECRET` | Chave secreta para assinatura dos tokens JWT | `sua_chave_secreta` |
+| `ACCESS_TOKEN_EXPIRES` | Tempo de vida do token de acesso (ex.: `15m`, `1h`, `24h`) | `24h` |
+| `REFRESH_TOKEN_EXPIRES` | Tempo de vida do refresh token (mantém login mesmo com o App fechado) | `720h` (30 dias) |
 | `PORT` | Porta onde a API será executada | `8080` |
 
 ---
@@ -94,7 +96,9 @@ As configurações de ambiente são definidas no arquivo `.env`:
 ### Autenticação (`/api/v1/auth`)
 
 - `POST /api/v1/auth/register` - Registro de novo usuário (`role: "user"` por padrão)
-- `POST /api/v1/auth/login` - Autenticação de usuário e retorno do token JWT
+- `POST /api/v1/auth/login` - Autenticação de usuário e retorno dos tokens
+- `POST /api/v1/auth/refresh` - Renova a sessão usando o `refresh_token` (rotação de token)
+- `POST /api/v1/auth/logout` - Revoga o `refresh_token` e encerra a sessão do dispositivo
 
 #### Exemplo de Requisição — Register (`POST /api/v1/auth/register`):
 ```json
@@ -109,6 +113,9 @@ As configurações de ambiente são definidas no arquivo `.env`:
 ```json
 {
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "kYx3mP9vQ2xF8sA4dR5tG6hJ7nB1cV0eWzL3uQoPqIrNmZbXcVbNa",
+  "expires_in": 86400,
+  "token_type": "Bearer",
   "user": {
     "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
     "name": "Guilherme Ruiz",
@@ -117,6 +124,25 @@ As configurações de ambiente são definidas no arquivo `.env`:
   }
 }
 ```
+
+#### Fluxo de Refresh Token
+
+O App recebe **dois** tokens: o `token` (acesso, curta duração) e o `refresh_token` (longa duração). Quando o access token expira, o App chama:
+
+```http
+POST /api/v1/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "kYx3mP9vQ2xF8sA4dR5tG6hJ7nB1cV0eWzL3uQoPqIrNmZbXcVbNa"
+}
+```
+
+A resposta tem o mesmo formato do login, com um **novo par** de tokens (o antigo refresh token é revogado). O App deve substituir o refresh token salvo pelo novo a cada refresh.
+
+Para sair da conta, o App envia o refresh token em `POST /api/v1/auth/logout` — a partir daí ele não pode mais ser usado para renovar a sessão.
+
+> ⚠️ **Importante (App):** o `refresh_token` deve ser armazenado de forma **segura** no dispositivo (Keychain no iOS, Keystore/EncryptedSharedPreferences no Android), **nunca** em `AsyncStorage`/`localStorage` sem criptografia.
 
 ---
 

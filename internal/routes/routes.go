@@ -31,6 +31,8 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		{
 			auth.POST("/register", authHandler.Register)
 			auth.POST("/login", authHandler.Login)
+			auth.POST("/refresh", authHandler.Refresh)
+			auth.POST("/logout", authHandler.Logout)
 		}
 
 		v1.GET("/posts", postHandler.GetFeed)

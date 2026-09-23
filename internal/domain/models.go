@@ -5,6 +5,7 @@ package domain
 func GetModels() []interface{} {
 	return []interface{}{
 		&User{},
+		&RefreshToken{},
 		&Post{},
 		&Comment{},
 		&Trail{},
