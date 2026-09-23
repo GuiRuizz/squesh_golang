@@ -65,6 +65,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 			// Trilhas & Progresso
 			trails := protected.Group("/trails")
 			{
+				trails.POST("/generate", trailHandler.GenerateCompleteTrail)             // <--- Novo: gera trilha COMPLETA
 				trails.POST("/:id/generate", trailHandler.GenerateInfiniteItems)
 				trails.POST("/items/:itemId/complete", trailHandler.CompleteTrailItem)        // <--- Novo
 				trails.PATCH("/items/:itemId/meals/:mealIndex", trailHandler.ToggleMealCheck) // <--- Novo

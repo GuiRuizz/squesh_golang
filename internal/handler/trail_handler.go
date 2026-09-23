@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"time"
@@ -383,5 +384,178 @@ func (h *TrailHandler) ToggleMealCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Status da refeição alterado com sucesso",
 		"checked": isChecked,
+	})
+}
+
+// BuildNewTrail cria uma trilha COMPLETA (trail + itens) remixando o conteúdo
+// de trilhas existentes do mesmo tipo/nível — estilo Duolingo, permitindo gerar
+// trilhas infinitas sem criar conteúdo manualmente a cada vez.
+//
+// Regras:
+//   - Se SourceTrailID for informado, usa o tipo/nível dessa trilha como modelo;
+//     caso contrário, usa Type/Level do input (pelo menos um precisa ser dado).
+//   - O pool de itens vem de outras trilhas do mesmo tipo/nível (excluindo a
+//     trilha modelo). Se estiver vazio mas a trilha modelo existe, usa os itens
+//     dela como origem do remix. Se não houver nada, gera itens genéricos.
+//   - Copia ItemCount itens embaralhados; se o pool for menor, repete com
+//     "(Variação)" no título para nunca faltar conteúdo.
+func BuildNewTrail(db *gorm.DB, input dto.GenerateTrailDTO) (*domain.Trail, error) {
+	var resolvedType, resolvedLevel string
+	var sourceID uuid.UUID
+	var sourceItems []domain.TrailItem
+
+	// 1. Descobre o tipo/nível da nova trilha
+	if input.SourceTrailID != "" {
+		var src domain.Trail
+		if err := db.Preload("Items").First(&src, "id = ?", input.SourceTrailID).Error; err != nil {
+			return nil, fmt.Errorf("trilha de origem não encontrada")
+		}
+		resolvedType = string(src.Type)
+		resolvedLevel = src.Level
+		sourceID = src.ID
+		sourceItems = src.Items
+	} else {
+		resolvedType = input.Type
+		resolvedLevel = input.Level
+		if resolvedType == "" {
+			return nil, fmt.Errorf("informe source_trail_id ou type para gerar a trilha")
+		}
+	}
+
+	itemCount := input.ItemCount
+	if itemCount < 1 {
+		itemCount = 5
+	}
+	if itemCount > 20 {
+		itemCount = 20
+	}
+
+	// 2. Monta o pool de itens vindos de trilhas existentes do mesmo tipo/nível
+	var exemplars []domain.Trail
+	query := db.Preload("Items").Where("type = ?", resolvedType)
+	if resolvedLevel != "" {
+		query = query.Where("level = ?", resolvedLevel)
+	}
+	if sourceID != uuid.Nil {
+		query = query.Where("id <> ?", sourceID)
+	}
+	if err := query.Find(&exemplars).Error; err != nil {
+		return nil, err
+	}
+
+	pool := make([]domain.TrailItem, 0)
+	for i := range exemplars {
+		pool = append(pool, exemplars[i].Items...)
+	}
+
+	// Sem outras trilhas do mesmo tipo -> usa a própria trilha modelo como pool
+	if len(pool) == 0 && len(sourceItems) > 0 {
+		pool = sourceItems
+	}
+
+	// 3. Embaralha o pool e monta os itens da nova trilha (com repetição c/ variação)
+	shuffled := make([]domain.TrailItem, len(pool))
+	copy(shuffled, pool)
+	rand.Shuffle(len(shuffled), func(i, j int) {
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	})
+
+	newItems := make([]domain.TrailItem, 0, itemCount)
+	for i := 0; i < itemCount; i++ {
+		order := i + 1
+
+		if len(shuffled) == 0 {
+			// Fallback: nenhum conteúdo existente -> metas genéricas
+			newItems = append(newItems, domain.TrailItem{
+				Order:       order,
+				Title:       fmt.Sprintf("Etapa %d", order),
+				Description: fmt.Sprintf("Meta gerada automaticamente para a sequência #%d da sua jornada.", order),
+				Value:       fmt.Sprintf("%d repetições / meta diária", 10+(order%5)*5),
+			})
+			continue
+		}
+
+		source := shuffled[i%len(shuffled)]
+		title := source.Title
+		if i >= len(shuffled) {
+			// Repetição do pool -> varia pequeno para parecer novo
+			title = fmt.Sprintf("%s (Variação)", source.Title)
+		}
+
+		newItems = append(newItems, domain.TrailItem{
+			Order:       order,
+			Title:       title,
+			Description: source.Description,
+			Value:       source.Value,
+		})
+	}
+
+	// 4. Título automático numerado caso não informado
+	title := input.Title
+	if title == "" {
+		var count int64
+		db.Model(&domain.Trail{}).Where("type = ?", resolvedType).Count(&count)
+
+		label := "Trilha"
+		if resolvedLevel != "" {
+			label = resolvedLevel
+		}
+		switch domain.TrailType(resolvedType) {
+		case domain.TrailTypeWorkout:
+			title = fmt.Sprintf("Treino Gerado #%d (%s)", count+1, label)
+		case domain.TrailTypeNutrition:
+			title = fmt.Sprintf("Nutrição Gerada #%d (%s)", count+1, label)
+		default:
+			title = fmt.Sprintf("Trilha Gerada #%d (%s)", count+1, label)
+		}
+	}
+
+	levelLabel := "personalizado"
+	if resolvedLevel != "" {
+		levelLabel = resolvedLevel
+	}
+
+	trail := domain.Trail{
+		Title:       title,
+		Description: fmt.Sprintf("Trilha %s %s gerada automaticamente a partir do conteúdo existente.", resolvedType, levelLabel),
+		Type:        domain.TrailType(resolvedType),
+		Level:       resolvedLevel,
+	}
+
+	// 5. Persiste trilha + itens numa transação
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&trail).Error; err != nil {
+			return err
+		}
+		for i := range newItems {
+			newItems[i].TrailID = trail.ID
+		}
+		return tx.Create(&newItems).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	trail.Items = newItems
+	return &trail, nil
+}
+
+// GenerateCompleteTrail é a rota que gera uma trilha completa a partir das existentes
+func (h *TrailHandler) GenerateCompleteTrail(c *gin.Context) {
+	var input dto.GenerateTrailDTO
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	trail, err := BuildNewTrail(h.DB, input)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "Trilha completa gerada com sucesso",
+		"data":    trail,
 	})
 }

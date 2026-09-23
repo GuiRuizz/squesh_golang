@@ -161,6 +161,32 @@ Para sair da conta, o App envia o refresh token em `POST /api/v1/auth/logout` �
 - `GET /api/v1/trails/:id` - Obtém os detalhes de uma trilha específica e seus itens
 - `POST /api/v1/trails` - Cria uma nova trilha (*Requer perfil Admin*)
 - `POST /api/v1/trails/:id/items` - Adiciona um novo item à trilha (*Requer perfil Admin*)
+- `POST /api/v1/trails/generate` - Gera uma **trilha completa nova** remixando itens de trilhas existentes (*login*)
+- `POST /api/v1/trails/:id/generate` - Adiciona N itens genéricos ao final de uma trilha (*login*)
+
+#### Geração de Trilha Completa (`POST /api/v1/trails/generate`) — estilo Duolingo
+
+Cria uma trilha nova (título, tipo, nível e itens) a partir do conteúdo já existente, permitindo gerar trilhas infinitas sem criar conteúdo manualmente. O corpo aceita:
+
+```json
+{
+  "type": "workout",
+  "level": "iniciante",
+  "item_count": 6,
+  "title": "Treino Personalizado"
+}
+```
+
+Ou, usando uma trilha modelo (herda tipo/nível dela):
+
+```json
+{
+  "source_trail_id": "d1a53ecf-39d6-42ad-8ccc-557d6e82b907",
+  "item_count": 4
+}
+```
+
+Regras: `source_trail_id` **ou** `type` são obrigatórios; `item_count` padrão 5 (máx. 20); os itens são copiados e embaralhados do pool de trilhas do mesmo tipo/nível (excluindo a trilha modelo); se faltar conteúdo, itens se repetem com "(Variação)" — nunca falta trilha para o usuário.
 
 #### Exemplo de Requisição — Criar Trilha (`POST /api/v1/trails`):
 ```json
