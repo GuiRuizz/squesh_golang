@@ -8,6 +8,8 @@ func GetModels() []interface{} {
 		&RefreshToken{},
 		&Post{},
 		&Comment{},
+		&PostLike{},
+		&Follow{},
 		&Trail{},
 		&TrailItem{},
 		&UserTrailProgress{},

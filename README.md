@@ -152,20 +152,35 @@ Para sair da conta, o App envia o refresh token em `POST /api/v1/auth/logout` �
 
 ### Posts (`/api/v1/posts`)
 
-- `GET /api/v1/posts` - Lista todas as postagens (Público)
+- `GET /api/v1/posts` - Lista todas as postagens (Público). Com token Bearer, cada post ganha `liked_by_me`; sempre traz `likes_count`
+- `GET /api/v1/posts/feed` - **Feed personalizado**: posts de quem você segue + seus posts (*login*)
 - `GET /api/v1/posts/:id/comments` - Lista os comentários de um post (Público)
+- `GET /api/v1/posts/:id/likes` - Lista os usuários que curtiram o post (Público)
 - `POST /api/v1/posts` - Cria uma nova postagem (login) — o `image_url` vem do fluxo de upload assinado
 - `POST /api/v1/posts/:id/comments` - Adiciona um comentário ao post (login)
 - `DELETE /api/v1/posts/:id/comments/:commentId` - Remove um comentário (apenas o autor ou admin)
+- `POST /api/v1/posts/:id/like` - Curte um post (login, idempotente — devolve `likes_count`)
+- `DELETE /api/v1/posts/:id/like` - Remove a curtida (login, idempotente)
 - `PUT /api/v1/posts/:id` - Atualiza a legenda de uma postagem
 - `DELETE /api/v1/posts/:id` - Remove uma postagem
+
+> 💡 Todo post da resposta traz `likes_count`. Quando a requisição tem **Bearer token**, vem também `liked_by_me` (`true/false`) — igual à flag `completed` dos itens de trilha.
+
+---
+
+### Seguidores (`/api/v1/users`)
+
+- `POST /api/v1/users/:id/follow` - Seguir um usuário (login; retorna 400 se for você mesmo; idempotente)
+- `DELETE /api/v1/users/:id/follow` - Deixar de seguir (login, idempotente)
+- `GET /api/v1/users/:id/followers` - Lista quem segue o usuário (Público)
+- `GET /api/v1/users/:id/following` - Lista quem o usuário segue (Público)
 
 ---
 
 ### Trilhas (`/api/v1/trails`)
 
 - `GET /api/v1/trails` - Lista todas as trilhas (suporta filtro por tipo: `?type=workout` ou `?type=nutrition`)
-- `GET /api/v1/trails/:id` - Obtém os detalhes de uma trilha específica e seus itens
+- `GET /api/v1/trails/:id` - Obtém os detalhes de uma trilha e seus itens; com Bearer token ganha `progress` e a flag `completed` em cada item
 - `POST /api/v1/trails` - Cria uma nova trilha (*Requer perfil Admin*)
 - `POST /api/v1/trails/:id/items` - Adiciona um novo item à trilha (*Requer perfil Admin*)
 - `POST /api/v1/trails/generate` - Gera uma **trilha completa nova** remixando itens de trilhas existentes (*login*)

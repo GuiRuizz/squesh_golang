@@ -22,6 +22,7 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 	postHandler := handler.NewPostHandler(db)
 	trailHandler := handler.NewTrailHandler(db)
 	userHandler := handler.NewUserHandler(db)
+	followHandler := handler.NewFollowHandler(db)
 	shopHandler := handler.NewShopHandler(db, notifService)
 	notificationHandler := handler.NewNotificationHandler(db)
 	uploadHandler := handler.NewUploadHandler(store)
@@ -39,6 +40,11 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 
 		v1.GET("/posts", postHandler.GetFeed)
 		v1.GET("/posts/:id/comments", postHandler.ListComments)
+		v1.GET("/posts/:id/likes", postHandler.GetPostLikes)
+
+		// Perfis públicos: quem segue / quem é seguido
+		v1.GET("/users/:id/followers", followHandler.ListFollowers)
+		v1.GET("/users/:id/following", followHandler.ListFollowing)
 
 		// Leitura de Trilhas (Pública)
 		v1.GET("/trails", trailHandler.ListTrails)
@@ -82,7 +88,8 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 				trails.POST("/generate", trailHandler.GenerateCompleteTrail)   // <--- Novo: gera trilha COMPLETA
 				trails.POST("/:id/generate", trailHandler.GenerateInfiniteItems)
 				trails.POST("/items/:itemId/complete", trailHandler.CompleteTrailItem)        // <--- Novo
-				trails.PATCH("/items/:itemId/meals/:mealIndex", trailHandler.ToggleMealCheck) // <--- Novo
+				trails.PATCH("/items/:itemId/meals", trailHandler.ToggleMealCheck)            // <--- Novo: marca/desmarca refeição (sem índice)
+				trails.PATCH("/items/:itemId/meals/:mealIndex", trailHandler.ToggleMealCheck) // mantido por compatibilidade (índice é ignorado)
 			}
 
 			// Usuários & Profile
@@ -98,12 +105,19 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 			// Postagens & Comentários
 			posts := protected.Group("/posts")
 			{
+				posts.GET("/feed", postHandler.GetPersonalizedFeed) // <--- Novo: feed de quem eu sigo + meus posts
 				posts.POST("", postHandler.CreatePost)
 				posts.POST("/:id/comments", postHandler.CreateComment)              // <--- Novo
 				posts.DELETE("/:id/comments/:commentId", postHandler.DeleteComment) // <--- Novo
+				posts.POST("/:id/like", postHandler.LikePost)                       // <--- Novo
+				posts.DELETE("/:id/like", postHandler.UnlikePost)                   // <--- Novo
 				posts.PUT("/:id", postHandler.UpdatePostCaption)
 				posts.DELETE("/:id", postHandler.DeletePost)
 			}
+
+			// Seguir / Deixar de seguir (ações autenticadas)
+			users.POST("/:id/follow", followHandler.FollowUser)     // <--- Novo
+			users.DELETE("/:id/follow", followHandler.UnfollowUser) // <--- Novo
 
 			// Upload (pedido de URL assinada)
 			uploads := protected.Group("/uploads")

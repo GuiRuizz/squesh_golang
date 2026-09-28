@@ -16,6 +16,11 @@ type Post struct {
 	Comments  []Comment `gorm:"foreignKey:PostID;constraint:OnDelete:CASCADE" json:"comments,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// LikesCount e LikedByMe são transitórios (gorm:"-"): preenchidos pelo
+	// handler em lote a partir da tabela de curtidas; liked_by_me só aparece
+	// quando há um usuário autenticado na requisição.
+	LikesCount int   `gorm:"-" json:"likes_count"`
+	LikedByMe  *bool `gorm:"-" json:"liked_by_me,omitempty"`
 }
 
 func (base *Post) BeforeCreate(tx *gorm.DB) (err error) {

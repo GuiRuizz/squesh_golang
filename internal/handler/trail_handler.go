@@ -57,6 +57,38 @@ func (h *TrailHandler) GetTrailByID(c *gin.Context) {
 		return
 	}
 
+	// Auth OPCIONAL: se o cliente enviar um Bearer token válido, a resposta
+	// ganha o progresso do usuário nessa trilha (quantos já concluídos, quantos
+	// faltam e a flag "completed" em cada item). Sem token, o GET continua
+	// público como antes.
+	if userID, ok := optionalUserID(c); ok {
+		done, err := h.userCompletedItems(userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao calcular progresso"})
+			return
+		}
+
+		completed := 0
+		for i := range trail.Items {
+			itemDone := done[trail.Items[i].ID]
+			if itemDone {
+				completed++
+			}
+			trail.Items[i].Completed = &itemDone
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"trail": trail,
+			"progress": gin.H{
+				"completed_items": completed,
+				"total_items":     len(trail.Items),
+				"remaining_items": len(trail.Items) - completed,
+				"percent":         trailPercent(completed, len(trail.Items)),
+			},
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, trail)
 }
 
@@ -570,9 +602,9 @@ type trailUserProgress struct {
 	nextItem  *domain.TrailItem
 }
 
-// computeUserProgress calcula, para cada trilha existente, quantos itens o
-// usuário já concluiu, o total e o próximo item não concluído.
-func (h *TrailHandler) computeUserProgress(userID uuid.UUID) ([]trailUserProgress, error) {
+// userCompletedItems devolve o conjunto de ids de itens (de qualquer trilha)
+// que o usuário já concluiu.
+func (h *TrailHandler) userCompletedItems(userID uuid.UUID) (map[uuid.UUID]bool, error) {
 	var progresses []domain.UserTrailProgress
 	if err := h.DB.Where("user_id = ?", userID).Find(&progresses).Error; err != nil {
 		return nil, err
@@ -580,6 +612,16 @@ func (h *TrailHandler) computeUserProgress(userID uuid.UUID) ([]trailUserProgres
 	done := make(map[uuid.UUID]bool, len(progresses))
 	for _, p := range progresses {
 		done[p.TrailItemID] = true
+	}
+	return done, nil
+}
+
+// computeUserProgress calcula, para cada trilha existente, quantos itens o
+// usuário já concluiu, o total e o próximo item não concluído.
+func (h *TrailHandler) computeUserProgress(userID uuid.UUID) ([]trailUserProgress, error) {
+	done, err := h.userCompletedItems(userID)
+	if err != nil {
+		return nil, err
 	}
 
 	var trails []domain.Trail

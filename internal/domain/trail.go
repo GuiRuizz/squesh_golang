@@ -34,6 +34,9 @@ type TrailItem struct {
 	Description string    `gorm:"type:text" json:"description"`
 	Value       string    `gorm:"type:varchar(100)" json:"value"` // ex: "3x12 repetições" ou "200g de peito de frango"
 	CreatedAt   time.Time `json:"created_at"`
+	// Completed é transitório (gorm:"-"): preenchido pelo handler com o
+	// progresso do usuário logado; omitido quando não há usuário.
+	Completed *bool `gorm:"-" json:"completed,omitempty"`
 }
 
 func (t *Trail) BeforeCreate(tx *gorm.DB) (err error) {
