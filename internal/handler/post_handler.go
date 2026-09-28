@@ -1,8 +1,8 @@
 package handler
 
 import (
-	"net/http"
 	"github.com/google/uuid"
+	"net/http"
 
 	"squesh_golang/internal/domain"
 	"squesh_golang/internal/dto"
@@ -109,5 +109,106 @@ func (h *PostHandler) CreatePost(c *gin.Context) {
 		return
 	}
 
+	// Recarrega com o autor para o app já ter os dados de exibição
+	h.DB.Preload("User").First(&post, "id = ?", post.ID)
+
 	c.JSON(http.StatusCreated, post)
+}
+
+// ListComments retorna os comentários de um post (público, como o feed)
+func (h *PostHandler) ListComments(c *gin.Context) {
+	postID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID de post inválido"})
+		return
+	}
+
+	var post domain.Post
+	if err := h.DB.First(&post, "id = ?", postID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Post não encontrado"})
+		return
+	}
+
+	var comments []domain.Comment
+	if err := h.DB.Where("post_id = ?", postID).Preload("User").Order("created_at asc").Find(&comments).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao buscar comentários"})
+		return
+	}
+
+	c.JSON(http.StatusOK, comments)
+}
+
+// CreateComment adiciona um comentário no post (autenticado)
+func (h *PostHandler) CreateComment(c *gin.Context) {
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
+		return
+	}
+
+	postID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID de post inválido"})
+		return
+	}
+
+	var input dto.CreateCommentDTO
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "text é obrigatório"})
+		return
+	}
+
+	var post domain.Post
+	if err := h.DB.First(&post, "id = ?", postID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Post não encontrado"})
+		return
+	}
+
+	comment := domain.Comment{
+		PostID: postID,
+		UserID: userID,
+		Text:   input.Text,
+	}
+	if err := h.DB.Create(&comment).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao criar comentário"})
+		return
+	}
+
+	// Recarrega com o autor para o app já ter os dados de exibição
+	h.DB.Preload("User").First(&comment, "id = ?", comment.ID)
+	c.JSON(http.StatusCreated, comment)
+}
+
+// DeleteComment apaga um comentário (apenas o autor ou um admin)
+func (h *PostHandler) DeleteComment(c *gin.Context) {
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
+		return
+	}
+	role, _ := c.Get("userRole")
+
+	commentID, err := uuid.Parse(c.Param("commentId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID de comentário inválido"})
+		return
+	}
+
+	var comment domain.Comment
+	if err := h.DB.First(&comment, "id = ?", commentID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Comentário não encontrado"})
+		return
+	}
+
+	if comment.UserID != userID && role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Você só pode apagar os próprios comentários"})
+		return
+	}
+
+	if err := h.DB.Delete(&comment).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao apagar comentário"})
+		return
+	}
+
+	c.JSON(http.StatusNoContent, nil)
 }

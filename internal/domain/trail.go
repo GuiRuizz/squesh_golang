@@ -18,7 +18,7 @@ type Trail struct {
 	ID          uuid.UUID   `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
 	Title       string      `gorm:"type:varchar(100);not null" json:"title"`
 	Description string      `gorm:"type:text" json:"description"`
-	Type        TrailType   `gorm:"type:varchar(20);not null" json:"type"` // "workout" ou "nutrition"
+	Type        TrailType   `gorm:"type:varchar(20);not null" json:"type"`  // "workout" ou "nutrition"
 	Level       string      `gorm:"type:varchar(20);not null" json:"level"` // "iniciante", "intermediario", "avancado"
 	Items       []TrailItem `gorm:"foreignKey:TrailID" json:"items,omitempty"`
 	CreatedAt   time.Time   `json:"created_at"`
@@ -28,6 +28,7 @@ type Trail struct {
 type TrailItem struct {
 	ID          uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
 	TrailID     uuid.UUID `gorm:"type:uuid;not null" json:"trail_id"`
+	Trail       Trail     `gorm:"foreignKey:TrailID" json:"-"` // associacao para validar o tipo da trilha (workout/nutrition)
 	Order       int       `gorm:"not null" json:"order"`
 	Title       string    `gorm:"type:varchar(100);not null" json:"title"`
 	Description string    `gorm:"type:text" json:"description"`

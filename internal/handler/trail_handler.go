@@ -227,9 +227,11 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 
 		// Verifica se o usuário já concluiu esse item
 		var count int64
-		tx.Model(&domain.UserTrailProgress{}).
+		if err := tx.Model(&domain.UserTrailProgress{}).
 			Where("user_id = ? AND trail_item_id = ?", userID, itemID).
-			Count(&count)
+			Count(&count).Error; err != nil {
+			return err
+		}
 
 		if count > 0 {
 			return fmt.Errorf("este item já foi concluído anteriormente")
@@ -322,7 +324,7 @@ func (h *TrailHandler) ToggleMealCheck(c *gin.Context) {
 		return
 	}
 
-	itemIDParam := c.Param("mealId")
+	itemIDParam := c.Param("itemId")
 	itemID, err := uuid.Parse(itemIDParam)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ID do item inválido"})
@@ -558,4 +560,148 @@ func (h *TrailHandler) GenerateCompleteTrail(c *gin.Context) {
 		"message": "Trilha completa gerada com sucesso",
 		"data":    trail,
 	})
+}
+
+// trailUserProgress agrega o progresso do usuário em uma trilha
+type trailUserProgress struct {
+	trail     domain.Trail
+	completed int
+	total     int
+	nextItem  *domain.TrailItem
+}
+
+// computeUserProgress calcula, para cada trilha existente, quantos itens o
+// usuário já concluiu, o total e o próximo item não concluído.
+func (h *TrailHandler) computeUserProgress(userID uuid.UUID) ([]trailUserProgress, error) {
+	var progresses []domain.UserTrailProgress
+	if err := h.DB.Where("user_id = ?", userID).Find(&progresses).Error; err != nil {
+		return nil, err
+	}
+	done := make(map[uuid.UUID]bool, len(progresses))
+	for _, p := range progresses {
+		done[p.TrailItemID] = true
+	}
+
+	var trails []domain.Trail
+	if err := h.DB.Preload("Items", func(db *gorm.DB) *gorm.DB {
+		return db.Order("trail_items.order asc")
+	}).Order("trails.created_at asc").Find(&trails).Error; err != nil {
+		return nil, err
+	}
+
+	results := make([]trailUserProgress, 0, len(trails))
+	for i := range trails {
+		tr := trails[i]
+		comp := 0
+		var next *domain.TrailItem
+		for j := range tr.Items {
+			if done[tr.Items[j].ID] {
+				comp++
+			} else if next == nil {
+				it := tr.Items[j]
+				next = &it
+			}
+		}
+		results = append(results, trailUserProgress{
+			trail:     tr,
+			completed: comp,
+			total:     len(tr.Items),
+			nextItem:  next,
+		})
+	}
+	return results, nil
+}
+
+func trailPercent(completed, total int) int {
+	if total == 0 {
+		return 0
+	}
+	return int(float64(completed) / float64(total) * 100)
+}
+
+// GetMyActiveTrail (GET /trails/me/active) devolve a trilha atual do usuário:
+// primeiro a que está em progresso e, se nenhuma, a próxima a ser iniciada.
+// Inclui o próximo item a concluir — é o que renderiza o caminho estilo Duolingo.
+func (h *TrailHandler) GetMyActiveTrail(c *gin.Context) {
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
+		return
+	}
+
+	progs, err := h.computeUserProgress(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao calcular progresso"})
+		return
+	}
+
+	// 1. Traz a trilha que já está em progresso
+	var active *trailUserProgress
+	for i := range progs {
+		p := &progs[i]
+		if p.total > 0 && p.completed > 0 && p.completed < p.total {
+			active = p
+			break
+		}
+	}
+	// 2. Se nenhuma iniciada, sugere a primeira trilha disponível
+	if active == nil {
+		for i := range progs {
+			p := &progs[i]
+			if p.total > 0 && p.completed == 0 {
+				active = p
+				break
+			}
+		}
+	}
+	// 3. Tudo concluído -> orienta a gerar uma trilha nova
+	if active == nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "Você concluiu todas as trilhas disponíveis. Gere uma nova com POST /trails/generate.",
+			"hint":  "generate",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"active": active.trail,
+		"progress": gin.H{
+			"completed_items": active.completed,
+			"total_items":     active.total,
+			"percent":         trailPercent(active.completed, active.total),
+		},
+		"next_item": active.nextItem,
+	})
+}
+
+// GetMyCompletedTrails (GET /trails/me/completed) lista as trilhas 100% concluídas
+func (h *TrailHandler) GetMyCompletedTrails(c *gin.Context) {
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
+		return
+	}
+
+	progs, err := h.computeUserProgress(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao calcular progresso"})
+		return
+	}
+
+	completed := make([]gin.H, 0)
+	for i := range progs {
+		p := &progs[i]
+		if p.total > 0 && p.completed == p.total {
+			completed = append(completed, gin.H{
+				"trail": p.trail,
+				"progress": gin.H{
+					"completed_items": p.completed,
+					"total_items":     p.total,
+					"percent":         100,
+				},
+			})
+		}
+	}
+
+	c.JSON(http.StatusOK, completed)
 }

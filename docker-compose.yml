@@ -37,6 +37,9 @@ services:
       - DB_PASSWORD=postgrespassword
       - DB_NAME=squesh_db
       - DB_PORT=5432
+      # Base pública das URLs de upload/arquivos (o App acessa por localhost)
+      - STORAGE_PUBLIC_BASE_URL=http://localhost:8080
+      - UPLOAD_DIR=uploads
     depends_on:
       postgres:
         condition: service_healthy # Aguarda o PostgreSQL estar totalmente pronto

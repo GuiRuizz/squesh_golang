@@ -87,6 +87,10 @@ As configurações de ambiente são definidas no arquivo `.env`:
 | `JWT_SECRET` | Chave secreta para assinatura dos tokens JWT | `sua_chave_secreta` |
 | `ACCESS_TOKEN_EXPIRES` | Tempo de vida do token de acesso (ex.: `15m`, `1h`, `24h`) | `24h` |
 | `REFRESH_TOKEN_EXPIRES` | Tempo de vida do refresh token (mantém login mesmo com o App fechado) | `720h` (30 dias) |
+| `STORAGE_DRIVER` | Backend de arquivos: `local` (API serve os arquivos) ou `s3` (futuro) | `local` |
+| `STORAGE_PUBLIC_BASE_URL` | Base pública das URLs de upload/arquivos geradas (use o endereço externo da API em produção) | `http://localhost:8080` |
+| `UPLOAD_DIR` | Diretório onde os arquivos são salvos no driver local | `uploads` |
+| `STORAGE_SECRET` | Segredo das assinaturas de upload (opcional; padrão = `JWT_SECRET`) | — |
 | `PORT` | Porta onde a API será executada | `8080` |
 
 ---
@@ -146,10 +150,13 @@ Para sair da conta, o App envia o refresh token em `POST /api/v1/auth/logout` �
 
 ---
 
-### Posts (`/api/v1/posts`) — *Requer Token JWT*
+### Posts (`/api/v1/posts`)
 
 - `GET /api/v1/posts` - Lista todas as postagens (Público)
-- `POST /api/v1/posts` - Cria uma nova postagem
+- `GET /api/v1/posts/:id/comments` - Lista os comentários de um post (Público)
+- `POST /api/v1/posts` - Cria uma nova postagem (login) — o `image_url` vem do fluxo de upload assinado
+- `POST /api/v1/posts/:id/comments` - Adiciona um comentário ao post (login)
+- `DELETE /api/v1/posts/:id/comments/:commentId` - Remove um comentário (apenas o autor ou admin)
 - `PUT /api/v1/posts/:id` - Atualiza a legenda de uma postagem
 - `DELETE /api/v1/posts/:id` - Remove uma postagem
 
@@ -163,6 +170,8 @@ Para sair da conta, o App envia o refresh token em `POST /api/v1/auth/logout` �
 - `POST /api/v1/trails/:id/items` - Adiciona um novo item à trilha (*Requer perfil Admin*)
 - `POST /api/v1/trails/generate` - Gera uma **trilha completa nova** remixando itens de trilhas existentes (*login*)
 - `POST /api/v1/trails/:id/generate` - Adiciona N itens genéricos ao final de uma trilha (*login*)
+- `GET /api/v1/trails/me/active` - Retorna a **trilha atual** do usuário com o próximo item a concluir e o % de progresso (*login*)
+- `GET /api/v1/trails/me/completed` - Lista as trilhas **100% concluídas** pelo usuário (*login*)
 
 #### Geração de Trilha Completa (`POST /api/v1/trails/generate`) — estilo Duolingo
 
@@ -197,6 +206,57 @@ Regras: `source_trail_id` **ou** `type` são obrigatórios; `item_count` padrão
   "level": "iniciante"
 }
 ```
+
+#### Progresso do Usuário (`GET /api/v1/trails/me/active`)
+
+Retorna a trilha que o usuário está fazendo agora (style Duolingo) com o próximo item a concluir:
+
+```json
+{
+  "active": { "id": "...", "title": "...", "type": "workout", "items": [ ... ] },
+  "progress": { "completed_items": 3, "total_items": 6, "percent": 50 },
+  "next_item": { "id": "...", "order": 4, "title": "..." }
+}
+```
+
+Regras: prioriza a trilha **em progresso** (alguns itens concluídos); se nenhuma, devolve a primeira trilha **não iniciada**; se o usuário concluiu tudo, responde `404` orientando a usar `POST /trails/generate`.
+
+---
+
+## 📤 Upload de Imagens (URL Assinada / Presigned)
+
+O fluxo é o mesmo que você usará com S3 depois — o servidor **nunca recebe o binário**:
+
+1. **Pedir a URL assinada** (login):
+   ```http
+   POST /api/v1/uploads/presign
+   Authorization: Bearer <token>
+   Content-Type: application/json
+
+   { "filename": "foto.jpg", "content_type": "image/jpeg" }
+   ```
+   Resposta:
+   ```json
+   {
+     "upload_url": "http://localhost:8080/api/v1/uploads/posts/abc-123.jpg?exp=1690000000&sig=7f3a...",
+     "image_url": "http://localhost:8080/api/v1/files/posts/abc-123.jpg",
+     "key": "posts/abc-123.jpg",
+     "expires_in": 900
+   }
+   ```
+2. **Enviar o arquivo direto na `upload_url`** (sem header de auth — a assinatura é a autenticação):
+   ```http
+   PUT /api/v1/uploads/posts/abc-123.jpg?exp=1690000000&sig=7f3a...
+   Content-Type: image/jpeg
+   ```
+3. **Criar o post** usando o `image_url` retornado:
+   ```json
+   { "user_id": "...", "image_url": "http://localhost:8080/api/v1/files/posts/abc-123.jpg", "caption": "Treino de hoje!" }
+   ```
+
+Formatos aceitos: `jpg`, `jpeg`, `png`, `webp`, `gif` (máx. 5MB). A URL assinada expira em **15 minutos**.
+
+> 🔁 **Troca futura para S3/MinIO:** ao implementar o driver `s3`, apenas as URLs mudam (bucket + assinatura AWS) — o App continua com o mesmo fluxo de `presign → PUT direto → image_url`. Nenhuma mudança nos endpoints.
 
 ---
 

@@ -7,4 +7,7 @@ type CreatePostDTO struct {
 	Caption  string `json:"caption"`
 }
 
-
+// CreateCommentDTO representa o payload recebido ao criar um comentário
+type CreateCommentDTO struct {
+	Text string `json:"text" binding:"required"`
+}

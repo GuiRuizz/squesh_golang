@@ -4,12 +4,13 @@ import (
 	"squesh_golang/internal/handler"
 	"squesh_golang/internal/middleware"
 	"squesh_golang/internal/service"
+	"squesh_golang/internal/storage"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
-func SetupRouter(db *gorm.DB) *gin.Engine {
+func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 	r := gin.Default()
 	r.Use(middleware.CORSMiddleware())
 
@@ -23,6 +24,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 	userHandler := handler.NewUserHandler(db)
 	shopHandler := handler.NewShopHandler(db, notifService)
 	notificationHandler := handler.NewNotificationHandler(db)
+	uploadHandler := handler.NewUploadHandler(store)
 
 	v1 := r.Group("/api/v1")
 	{
@@ -36,6 +38,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		}
 
 		v1.GET("/posts", postHandler.GetFeed)
+		v1.GET("/posts/:id/comments", postHandler.ListComments)
 
 		// Leitura de Trilhas (Pública)
 		v1.GET("/trails", trailHandler.ListTrails)
@@ -44,6 +47,15 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		// Catálogo da Loja (Leitura Pública)
 		v1.GET("/shop", shopHandler.GetItems)
 		v1.GET("/shop/:id", shopHandler.GetItemByID)
+
+		// Upload de arquivos: o app faz o PUT direto na URL assinada
+		// (a assinatura na query string é a autenticação — sem JWT aqui).
+		v1.PUT("/uploads/*key", uploadHandler.Upload)
+
+		// Arquivos públicos (driver local — vira CDN/bucket com S3 depois)
+		if dir := store.UploadDir(); dir != "" {
+			v1.Static("/files", dir)
+		}
 
 		// Rotas Protegidas por Login
 		protected := v1.Group("")
@@ -65,7 +77,9 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 			// Trilhas & Progresso
 			trails := protected.Group("/trails")
 			{
-				trails.POST("/generate", trailHandler.GenerateCompleteTrail)             // <--- Novo: gera trilha COMPLETA
+				trails.GET("/me/active", trailHandler.GetMyActiveTrail)        // <--- Novo: trilha atual + próxima etapa
+				trails.GET("/me/completed", trailHandler.GetMyCompletedTrails) // <--- Novo: trilhas concluídas
+				trails.POST("/generate", trailHandler.GenerateCompleteTrail)   // <--- Novo: gera trilha COMPLETA
 				trails.POST("/:id/generate", trailHandler.GenerateInfiniteItems)
 				trails.POST("/items/:itemId/complete", trailHandler.CompleteTrailItem)        // <--- Novo
 				trails.PATCH("/items/:itemId/meals/:mealIndex", trailHandler.ToggleMealCheck) // <--- Novo
@@ -81,12 +95,20 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 				users.PATCH("/me/password", userHandler.UpdatePassword)
 			}
 
-			// Postagens
+			// Postagens & Comentários
 			posts := protected.Group("/posts")
 			{
 				posts.POST("", postHandler.CreatePost)
+				posts.POST("/:id/comments", postHandler.CreateComment)              // <--- Novo
+				posts.DELETE("/:id/comments/:commentId", postHandler.DeleteComment) // <--- Novo
 				posts.PUT("/:id", postHandler.UpdatePostCaption)
 				posts.DELETE("/:id", postHandler.DeletePost)
+			}
+
+			// Upload (pedido de URL assinada)
+			uploads := protected.Group("/uploads")
+			{
+				uploads.POST("/presign", uploadHandler.PresignUpload) // <--- Novo
 			}
 
 			// Rotas Exclusivas de ADMIN

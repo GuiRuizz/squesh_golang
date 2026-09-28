@@ -10,6 +10,7 @@ func GetModels() []interface{} {
 		&Comment{},
 		&Trail{},
 		&TrailItem{},
+		&UserTrailProgress{},
 		&ShopItem{},
 		&UserInventory{},
 		&Notification{},
