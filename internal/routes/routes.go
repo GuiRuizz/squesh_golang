@@ -83,7 +83,8 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 			// Trilhas & Progresso
 			trails := protected.Group("/trails")
 			{
-				trails.GET("/me/active", trailHandler.GetMyActiveTrail)        // <--- Novo: trilha atual + próxima etapa
+				trails.GET("/me", trailHandler.GetMyTrails)              // <--- Novo: todas as trilhas com progresso + limite diário
+			trails.GET("/me/active", trailHandler.GetMyActiveTrail)        // <--- Novo: trilha atual + próxima etapa
 				trails.GET("/me/completed", trailHandler.GetMyCompletedTrails) // <--- Novo: trilhas concluídas
 				trails.POST("/generate", trailHandler.GenerateCompleteTrail)   // <--- Novo: gera trilha COMPLETA
 				trails.POST("/:id/generate", trailHandler.GenerateInfiniteItems)

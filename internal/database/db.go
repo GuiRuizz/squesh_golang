@@ -34,6 +34,13 @@ func InitDB() *gorm.DB {
 		log.Fatalf("Erro ao executar AutoMigrate: %v", err)
 	}
 
+	// Migração manual: o progresso passou a ser por refeição (meal_index), então
+	// o índice único antigo (user_id, trail_item_id) bloquearia o 2º check do dia.
+	// O AutoMigrate cria o novo (idx_user_item_meal), mas não remove o legado.
+	if err := db.Exec("DROP INDEX IF EXISTS idx_user_item").Error; err != nil {
+		log.Fatalf("Erro ao remover o índice legado idx_user_item: %v", err)
+	}
+
 	fmt.Println("Conexão e AutoMigrate do [squesh_golang] executados com sucesso!")
 	return db
 }

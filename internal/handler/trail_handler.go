@@ -62,7 +62,7 @@ func (h *TrailHandler) GetTrailByID(c *gin.Context) {
 	// faltam e a flag "completed" em cada item). Sem token, o GET continua
 	// público como antes.
 	if userID, ok := optionalUserID(c); ok {
-		done, err := h.userCompletedItems(userID)
+		checks, err := h.userMealChecks(userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao calcular progresso"})
 			return
@@ -70,11 +70,9 @@ func (h *TrailHandler) GetTrailByID(c *gin.Context) {
 
 		completed := 0
 		for i := range trail.Items {
-			itemDone := done[trail.Items[i].ID]
-			if itemDone {
+			if applyItemProgress(&trail.Items[i], checks[trail.Items[i].ID]) {
 				completed++
 			}
-			trail.Items[i].Completed = &itemDone
 		}
 
 		c.JSON(http.StatusOK, gin.H{
@@ -269,10 +267,39 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 			return fmt.Errorf("este item já foi concluído anteriormente")
 		}
 
-		// Registra a conclusão na tabela de progresso
+		// Regra de negócio: máximo de 1 conclusão por dia por TIPO de trilha
+		// (1 treino/dia + 1 dia de alimentação/dia, independentes entre si).
+		var itemTrail domain.Trail
+		if err := tx.First(&itemTrail, "id = ?", item.TrailID).Error; err != nil {
+			return fmt.Errorf("trilha do item não encontrada")
+		}
+
+		// Dias de alimentação são concluídos refeição adigestura
+		// (PATCH /trails/items/:id/meals), não por este endpoint.
+		if itemTrail.Type == domain.TrailTypeNutrition && len(item.Meals) > 0 {
+			return fmt.Errorf(
+				"este item é um dia de alimentação: marque as refeições em /trails/items/%s/meals",
+				itemID,
+			)
+		}
+
+		reached, err := dailyLimitReachedExcept(tx, userID, itemTrail.Type, item.ID)
+		if err != nil {
+			return err
+		}
+		if reached {
+			return fmt.Errorf(
+				"limite diário atingido: você já concluiu 1 %s hoje. Volte amanhã!",
+				dailyLabel(itemTrail.Type),
+			)
+		}
+
+		// Registra a conclusão na tabela de progresso.
+		// MealIndex = -1: item simples (treino), sem refeições.
 		progress := domain.UserTrailProgress{
 			UserID:      userID,
 			TrailItemID: itemID,
+			MealIndex:   -1,
 			CompletedAt: time.Now(),
 		}
 		if err := tx.Create(&progress).Error; err != nil {
@@ -365,6 +392,15 @@ func (h *TrailHandler) ToggleMealCheck(c *gin.Context) {
 
 	var isChecked bool
 
+	// Corpo OPCIONAL: { "meal_index": 0, "checked": true }
+	//   - meal_index: qual refeição do dia (obrigatório quando o dia tem refeições)
+	//   - checked:    estado desejado; se ausente, alterna (toggle)
+	var payload struct {
+		MealIndex *int  `json:"meal_index"`
+		Checked   *bool `json:"checked"`
+	}
+	_ = c.ShouldBindJSON(&payload)
+
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
 		// Busca o item juntamente com a trilha pai para validar o tipo
 		var item domain.TrailItem
@@ -382,31 +418,65 @@ func (h *TrailHandler) ToggleMealCheck(c *gin.Context) {
 			return fmt.Errorf("o item informado não pertence a uma trilha de nutrição")
 		}
 
-		// Verifica se já existe o registro de conclusão
-		var progress domain.UserTrailProgress
-		err := tx.Where("user_id = ? AND trail_item_id = ?", userID, itemID).First(&progress).Error
-
-		if err == nil {
-			// Já existe -> desmarca (deleta o registro)
-			if err := tx.Delete(&progress).Error; err != nil {
-				return err
+		// Resolve a refeição alvo: um DIA com Meals exige meal_index; itens
+		// antigos (sem refeições) usam o modo simples (-1).
+		mealIndex := -1
+		if len(item.Meals) > 0 {
+			if payload.MealIndex == nil {
+				return fmt.Errorf("informe meal_index com a refeição do dia que deseja marcar")
 			}
-			isChecked = false
-		} else if err == gorm.ErrRecordNotFound {
-			// Não existe -> marca como concluído
+			mealIndex = *payload.MealIndex
+			if mealIndex < 0 || mealIndex >= len(item.Meals) {
+				return fmt.Errorf("meal_index inválido: este dia tem %d refeições", len(item.Meals))
+			}
+		}
+
+		// Estado atual daquela refeição específica
+		var progress domain.UserTrailProgress
+		findErr := tx.Where(
+			"user_id = ? AND trail_item_id = ? AND meal_index = ?",
+			userID, itemID, mealIndex,
+		).First(&progress).Error
+		if findErr != nil && findErr != gorm.ErrRecordNotFound {
+			return findErr
+		}
+		found := findErr == nil
+
+		wantChecked := !found
+		if payload.Checked != nil {
+			wantChecked = *payload.Checked
+		}
+
+		if wantChecked && !found {
+			// Regra de negócio: 1 DIA de alimentação por dia. Seguir marcando as
+			// demais refeições do MESMO dia é livre; começar OUTRO dia hoje, não.
+			reached, dailyErr := dailyLimitReachedExcept(tx, userID, trail.Type, item.ID)
+			if dailyErr != nil {
+				return dailyErr
+			}
+			if reached {
+				return fmt.Errorf(
+					"limite diário atingido: você já começou o dia de alimentação de hoje. Volte amanhã!",
+				)
+			}
+
 			newProgress := domain.UserTrailProgress{
 				UserID:      userID,
 				TrailItemID: itemID,
+				MealIndex:   mealIndex,
 				CompletedAt: time.Now(),
 			}
 			if err := tx.Create(&newProgress).Error; err != nil {
 				return err
 			}
-			isChecked = true
-		} else {
-			return err
+		} else if !wantChecked && found {
+			// Desmarcar a refeição (sempre permitido) libera a marcação
+			if err := tx.Delete(&progress).Error; err != nil {
+				return err
+			}
 		}
 
+		isChecked = wantChecked
 		return nil
 	})
 
@@ -602,24 +672,75 @@ type trailUserProgress struct {
 	nextItem  *domain.TrailItem
 }
 
-// userCompletedItems devolve o conjunto de ids de itens (de qualquer trilha)
-// que o usuário já concluiu.
-func (h *TrailHandler) userCompletedItems(userID uuid.UUID) (map[uuid.UUID]bool, error) {
+// userMealChecks devolve, por item, o conjunto de índices de refeição já
+// marcados pelo usuário. Para itens sem refeições (treinos), o único índice
+// válido é -1. É a base de todo o cálculo de progresso do app.
+func (h *TrailHandler) userMealChecks(userID uuid.UUID) (map[uuid.UUID]map[int]bool, error) {
 	var progresses []domain.UserTrailProgress
 	if err := h.DB.Where("user_id = ?", userID).Find(&progresses).Error; err != nil {
 		return nil, err
 	}
-	done := make(map[uuid.UUID]bool, len(progresses))
+
+	checks := make(map[uuid.UUID]map[int]bool, len(progresses))
 	for _, p := range progresses {
-		done[p.TrailItemID] = true
+		set, ok := checks[p.TrailItemID]
+		if !ok {
+			set = make(map[int]bool, 1)
+			checks[p.TrailItemID] = set
+		}
+		set[p.MealIndex] = true
 	}
-	return done, nil
+	return checks, nil
+}
+
+// itemMealsRequired devolve quantas "conclusões" o item exige: 1 para itens
+// simples (treinos) e uma por refeição para dias de nutrição.
+func itemMealsRequired(item *domain.TrailItem) int {
+	if len(item.Meals) == 0 {
+		return 1
+	}
+	return len(item.Meals)
+}
+
+// itemProgressCount conta quantas refeições/etapas do item já foram marcadas.
+func itemProgressCount(item *domain.TrailItem, checks map[int]bool) int {
+	if len(item.Meals) == 0 {
+		if checks[-1] {
+			return 1
+		}
+		return 0
+	}
+	count := 0
+	for i := range item.Meals {
+		if checks[i] {
+			count++
+		}
+	}
+	return count
+}
+
+// applyItemProgress preenche as flags transitórias do item (completed e o
+// consumed de cada refeição) e devolve se o item está concluído.
+func applyItemProgress(item *domain.TrailItem, checks map[int]bool) bool {
+	required := itemMealsRequired(item)
+	count := itemProgressCount(item, checks)
+	done := count >= required
+
+	completed := done
+	item.Completed = &completed
+
+	for i := range item.Meals {
+		consumed := checks[i]
+		item.Meals[i].Consumed = &consumed
+	}
+	return done
 }
 
 // computeUserProgress calcula, para cada trilha existente, quantos itens o
-// usuário já concluiu, o total e o próximo item não concluído.
+// usuário já concluiu, o total e o próximo item não concluído. Em dias de
+// nutrição, o item só conta como concluído com TODAS as refeições marcadas.
 func (h *TrailHandler) computeUserProgress(userID uuid.UUID) ([]trailUserProgress, error) {
-	done, err := h.userCompletedItems(userID)
+	checks, err := h.userMealChecks(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -637,7 +758,9 @@ func (h *TrailHandler) computeUserProgress(userID uuid.UUID) ([]trailUserProgres
 		comp := 0
 		var next *domain.TrailItem
 		for j := range tr.Items {
-			if done[tr.Items[j].ID] {
+			// Preenche as flags transitórias (completed + consumed por refeição)
+			// para o App já renderizar o caminho sem outra chamada.
+			if applyItemProgress(&tr.Items[j], checks[tr.Items[j].ID]) {
 				comp++
 			} else if next == nil {
 				it := tr.Items[j]
@@ -663,12 +786,19 @@ func trailPercent(completed, total int) int {
 
 // GetMyActiveTrail (GET /trails/me/active) devolve a trilha atual do usuário:
 // primeiro a que está em progresso e, se nenhuma, a próxima a ser iniciada.
-// Inclui o próximo item a concluir — é o que renderiza o caminho estilo Duolingo.
+// Aceita o filtro opcional ?type=workout|nutrition para o App pedir cada
+// coluna da home separadamente. Inclui o próximo item a concluir — é o que
+// renderiza o caminho estilo Duolingo.
 func (h *TrailHandler) GetMyActiveTrail(c *gin.Context) {
 	userID, ok := userIDFromContext(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
 		return
+	}
+
+	trailType := c.Query("type")
+	matchesType := func(p *trailUserProgress) bool {
+		return trailType == "" || string(p.trail.Type) == trailType
 	}
 
 	progs, err := h.computeUserProgress(userID)
@@ -681,6 +811,9 @@ func (h *TrailHandler) GetMyActiveTrail(c *gin.Context) {
 	var active *trailUserProgress
 	for i := range progs {
 		p := &progs[i]
+		if !matchesType(p) {
+			continue
+		}
 		if p.total > 0 && p.completed > 0 && p.completed < p.total {
 			active = p
 			break
@@ -690,6 +823,9 @@ func (h *TrailHandler) GetMyActiveTrail(c *gin.Context) {
 	if active == nil {
 		for i := range progs {
 			p := &progs[i]
+			if !matchesType(p) {
+				continue
+			}
 			if p.total > 0 && p.completed == 0 {
 				active = p
 				break
@@ -746,4 +882,131 @@ func (h *TrailHandler) GetMyCompletedTrails(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, completed)
+}
+
+// dailyLimitReachedExcept devolve true se o usuário JÁ começou hoje uma etapa
+// do tipo informado, ignorando o item indicado (política: 1 conclusão por dia
+// por tipo de trilha; continuar o mesmo dia é permitido, começar outro não).
+func dailyLimitReachedExcept(
+	tx *gorm.DB,
+	userID uuid.UUID,
+	trailType domain.TrailType,
+	exceptItemID uuid.UUID,
+) (bool, error) {
+	now := time.Now()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// COUNT(DISTINCT item): um dia de alimentação tem várias refeições, mas
+	// conta como UMA etapa do dia.
+	var count int64
+	err := tx.Model(&domain.UserTrailProgress{}).
+		Select("COUNT(DISTINCT user_trail_progresses.trail_item_id)").
+		Joins("JOIN trail_items ON trail_items.id = user_trail_progresses.trail_item_id").
+		Joins("JOIN trails ON trails.id = trail_items.trail_id").
+		Where(
+			"user_trail_progresses.user_id = ? AND trails.type = ? AND user_trail_progresses.completed_at >= ? AND user_trail_progresses.trail_item_id <> ?",
+			userID, trailType, start, exceptItemID,
+		).
+		Scan(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count >= 1, nil
+}
+
+// dailyLabel devolve o rótulo amigável do tipo para as mensagens de limite.
+func dailyLabel(trailType domain.TrailType) string {
+	if trailType == domain.TrailTypeWorkout {
+		return "treino"
+	}
+	return "alimentação"
+}
+
+// completionsTodayByType devolve quantas etapas o usuário CONCLUIU hoje
+// (um dia de nutrição só conta com todas as refeições marcadas), agrupado
+// por tipo de trilha. Alimenta o `today_completed` da Home.
+func (h *TrailHandler) completionsTodayByType(userID uuid.UUID) (map[domain.TrailType]int, error) {
+	now := time.Now()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// Um item está concluído quando tem linhas de progresso >= GREATEST(1, nº de
+	// refeições). Workout tem 0 refeições -> precisa de 1 linha; dia de
+	// nutrição com 4 refeições -> precisa das 4.
+	var rows []struct {
+		Type   domain.TrailType
+		ItemID uuid.UUID
+	}
+	err := h.DB.Raw(
+		`SELECT trails.type AS type, utp.trail_item_id AS item_id
+		 FROM user_trail_progresses utp
+		 JOIN trail_items ON trail_items.id = utp.trail_item_id
+		 JOIN trails ON trails.id = trail_items.trail_id
+		 WHERE utp.user_id = ?
+		 GROUP BY trails.type, utp.trail_item_id, trail_items.meals
+		 HAVING COUNT(*) >= GREATEST(1, jsonb_array_length(COALESCE(trail_items.meals, '[]'::jsonb)))
+		    AND MAX(utp.completed_at) >= ?`,
+		userID, start,
+	).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	counts := make(map[domain.TrailType]int, len(rows))
+	for _, r := range rows {
+		counts[r.Type]++
+	}
+	return counts, nil
+}
+
+// GetMyTrails (GET /trails/me) lista TODAS as trilhas do usuário com o
+// progresso individual (itens com a flag `completed`) e informa se o limite
+// diário de cada tipo já foi atingido hoje — é o que alimenta a Home com um
+// botão/card por trilha e as etapas dentro. Aceita ?type=workout|nutrition.
+func (h *TrailHandler) GetMyTrails(c *gin.Context) {
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
+		return
+	}
+
+	trailType := c.Query("type")
+	matchesType := func(p *trailUserProgress) bool {
+		return trailType == "" || string(p.trail.Type) == trailType
+	}
+
+	progs, err := h.computeUserProgress(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao calcular progresso"})
+		return
+	}
+
+	trails := make([]gin.H, 0, len(progs))
+	for i := range progs {
+		p := &progs[i]
+		if !matchesType(p) {
+			continue
+		}
+		trails = append(trails, gin.H{
+			"trail": p.trail,
+			"progress": gin.H{
+				"completed_items": p.completed,
+				"total_items":     p.total,
+				"percent":         trailPercent(p.completed, p.total),
+			},
+		})
+	}
+
+	counts, err := h.completionsTodayByType(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao calcular limite diário"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trails": trails,
+		"today_completed": gin.H{
+			"workout":   counts[domain.TrailTypeWorkout] > 0,
+			"nutrition": counts[domain.TrailTypeNutrition] > 0,
+		},
+	})
 }
