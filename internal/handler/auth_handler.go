@@ -116,6 +116,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Email:    dto.Email,
 		Password: string(hashedPassword),
 		Role:     "user", // Define a role padrão de criação
+		// Todo mundo nasce com as notificações ligadas; o usuário desliga o que
+		// não quiser em Configurações.
+		Preferences: domain.DefaultPreferences(),
 	}
 
 	if err := h.DB.Create(&user).Error; err != nil {

@@ -39,10 +39,18 @@ func (h *UploadHandler) PresignUpload(c *gin.Context) {
 	var input struct {
 		Filename    string `json:"filename" binding:"required"`
 		ContentType string `json:"content_type" binding:"required"`
+		// Folder separa o que é foto de post do que é foto de perfil. Vazio
+		// significa "posts" (o app antigo não mandava o campo).
+		Folder string `json:"folder" binding:"omitempty,oneof=posts avatars"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "filename e content_type são obrigatórios"})
 		return
+	}
+
+	folder := input.Folder
+	if folder == "" {
+		folder = "posts"
 	}
 
 	ext := strings.ToLower(filepath.Ext(input.Filename))
@@ -52,7 +60,7 @@ func (h *UploadHandler) PresignUpload(c *gin.Context) {
 	}
 
 	// Chave única e opaca; a extensão real é a que você enviou no arquivo
-	key := fmt.Sprintf("posts/%s%s", uuid.NewString(), ext)
+	key := fmt.Sprintf("%s/%s%s", folder, uuid.NewString(), ext)
 
 	const presignTTL = 15 * time.Minute
 	uploadURL, err := h.Storage.PresignUpload(key, input.ContentType, presignTTL)

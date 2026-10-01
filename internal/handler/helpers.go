@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"net/http"
 	"strings"
 
 	"squesh_golang/internal/utils"
@@ -26,6 +27,17 @@ func userIDFromContext(c *gin.Context) (uuid.UUID, bool) {
 	default:
 		return uuid.Nil, false
 	}
+}
+
+// requireUserID é o userIDFromContext para handlers protegidos: quando não há
+// usuário logado, já escreve o 401 e devolve false.
+func requireUserID(c *gin.Context) (uuid.UUID, bool) {
+	id, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
+		return uuid.Nil, false
+	}
+	return id, true
 }
 
 // optionalUserID tenta extrair o usuário de um Bearer token, se presente.

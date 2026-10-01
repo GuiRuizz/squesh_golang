@@ -1,8 +1,8 @@
 package handler
 
 import (
-	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"squesh_golang/internal/domain"
@@ -30,8 +30,6 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 		return
 	}
 
-	fmt.Println("UserID from context:", userIDCtx)
-
 	// Type assertion direto para uuid.UUID
 	userID, ok := userIDCtx.(uuid.UUID)
 	if !ok {
@@ -47,20 +45,60 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 		return
 	}
 
-	// Calcula o streak baseado nos posts do usuário
-	streak := h.calculateStreak(user.ID)
+	c.JSON(http.StatusOK, h.profileResponse(&user))
+}
 
-	response := dto.UserProfileResponseDTO{
+// userFromContext devolve o usuário logado, já com o perfil carregado.
+func (h *UserHandler) userFromContext(c *gin.Context) (*domain.User, bool) {
+	userIDCtx, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Não autorizado"})
+		return nil, false
+	}
+
+	userID, ok := userIDCtx.(uuid.UUID)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de usuário inválido no contexto"})
+		return nil, false
+	}
+
+	var user domain.User
+	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Usuário não encontrado"})
+		return nil, false
+	}
+	return &user, true
+}
+
+// profileResponse monta o DTO do perfil. O streak é recalculado aqui (ele
+// depende das postagens, não da coluna) e as preferências saem com o padrão
+// já aplicado.
+func (h *UserHandler) profileResponse(user *domain.User) dto.UserProfileResponseDTO {
+	prefs := user.Preferences
+	return dto.UserProfileResponseDTO{
 		ID:        user.ID,
 		Name:      user.Name,
 		Email:     user.Email,
 		Role:      user.Role,
 		AvatarURL: user.AvatarURL,
-		Streak:    streak,
+		Bio:       user.Bio,
+		Streak:    h.calculateStreak(user.ID),
+		Points:    user.Points,
+		Preferences: dto.UserPreferencesResponseDTO{
+			PushEnabled:      prefs.Push(),
+			WorkoutReminders: boolOrDefault(prefs.WorkoutReminders),
+			ShopNews:         boolOrDefault(prefs.ShopNews),
+			SocialAlerts:     boolOrDefault(prefs.SocialAlerts),
+		},
 		CreatedAt: user.CreatedAt,
 	}
+}
 
-	c.JSON(http.StatusOK, response)
+func boolOrDefault(v *bool) bool {
+	if v == nil {
+		return true
+	}
+	return *v
 }
 
 // Lógica de cálculo de dias consecutivos com postagens
@@ -157,17 +195,12 @@ func (h *UserHandler) GetRanking(c *gin.Context) {
 	})
 }
 
-// UpdateProfile atualiza os dados básicos do usuário logado (Nome e Avatar)
+// UpdateProfile atualiza os dados básicos do usuário logado (Nome, Bio e Avatar).
+// Atualização PARCIAL: só os campos presentes no corpo são gravados, para o app
+// poder editar um campo por vez sem apagar os outros.
 func (h *UserHandler) UpdateProfile(c *gin.Context) {
-	userIDCtx, exists := c.Get("userID")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Não autorizado"})
-		return
-	}
-
-	userID, ok := userIDCtx.(uuid.UUID)
+	user, ok := h.userFromContext(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de usuário inválido no contexto"})
 		return
 	}
 
@@ -177,34 +210,69 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		return
 	}
 
-	var user domain.User
-	if err := h.DB.First(&user, "id = ?", userID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Usuário não encontrado"})
-		return
+	if input.Name != nil {
+		name := strings.TrimSpace(*input.Name)
+		if name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Nome não pode ficar vazio"})
+			return
+		}
+		user.Name = name
+	}
+	if input.Bio != nil {
+		user.Bio = strings.TrimSpace(*input.Bio)
+	}
+	if input.AvatarURL != nil {
+		user.AvatarURL = strings.TrimSpace(*input.AvatarURL)
 	}
 
-	// Atualiza apenas os campos permitidos
-	user.Name = input.Name
-	user.AvatarURL = input.AvatarURL
-
-	if err := h.DB.Save(&user).Error; err != nil {
+	if err := h.DB.Model(user).Select("name", "bio", "avatar_url", "updated_at").Updates(user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao atualizar dados do usuário"})
 		return
 	}
 
-	streak := h.calculateStreak(user.ID)
+	c.JSON(http.StatusOK, h.profileResponse(user))
+}
 
-	response := dto.UserProfileResponseDTO{
-		ID:        user.ID,
-		Name:      user.Name,
-		Email:     user.Email,
-		Role:      user.Role,
-		AvatarURL: user.AvatarURL,
-		Streak:    streak,
-		CreatedAt: user.CreatedAt,
+// UpdatePreferences salva as preferências de notificação (PUT /users/me/preferences).
+// Parcial pelos mesmos motivos do perfil: só o que vier no corpo muda.
+func (h *UserHandler) UpdatePreferences(c *gin.Context) {
+	user, ok := h.userFromContext(c)
+	if !ok {
+		return
 	}
 
-	c.JSON(http.StatusOK, response)
+	var input dto.UpdatePreferencesDTO
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	prefs := user.Preferences
+	if prefs.PushEnabled == nil || prefs.WorkoutReminders == nil || prefs.ShopNews == nil || prefs.SocialAlerts == nil {
+		// Usuário sem preferências gravadas ainda: começa do padrão (tudo ligado)
+		// para desligar um switch não mantiver os outros como "nunca configurado".
+		prefs = domain.DefaultPreferences()
+	}
+	if input.PushEnabled != nil {
+		prefs.PushEnabled = input.PushEnabled
+	}
+	if input.WorkoutReminders != nil {
+		prefs.WorkoutReminders = input.WorkoutReminders
+	}
+	if input.ShopNews != nil {
+		prefs.ShopNews = input.ShopNews
+	}
+	if input.SocialAlerts != nil {
+		prefs.SocialAlerts = input.SocialAlerts
+	}
+
+	user.Preferences = prefs
+	if err := h.DB.Model(user).Select("preferences", "updated_at").Updates(user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao salvar preferências"})
+		return
+	}
+
+	c.JSON(http.StatusOK, h.profileResponse(user))
 }
 
 // UpdatePassword realiza a troca de senha com verificação da senha atual
