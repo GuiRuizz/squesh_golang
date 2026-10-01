@@ -3,10 +3,10 @@ package handler
 import (
 	"net/http"
 	"strings"
-	"time"
 
 	"squesh_golang/internal/domain"
 	"squesh_golang/internal/dto"
+	"squesh_golang/internal/service"
 	"squesh_golang/internal/utils"
 
 	"github.com/gin-gonic/gin"
@@ -70,10 +70,14 @@ func (h *UserHandler) userFromContext(c *gin.Context) (*domain.User, bool) {
 	return &user, true
 }
 
-// profileResponse monta o DTO do perfil. O streak é recalculado aqui (ele
-// depende das postagens, não da coluna) e as preferências saem com o padrão
-// já aplicado.
+// profileResponse monta o DTO do perfil. A ofensiva é DERIVADA dos dias
+// completos (alimentação + treino 100%), não da coluna: aqui ela é recalculada
+// e, de quebra, o progresso parcial dos dias passados é descartado.
 func (h *UserHandler) profileResponse(user *domain.User) dto.UserProfileResponseDTO {
+	if state, err := service.SyncUserDays(h.DB, user.ID); err == nil {
+		user.StreakCount = state.Streak
+	}
+
 	prefs := user.Preferences
 	return dto.UserProfileResponseDTO{
 		ID:        user.ID,
@@ -82,7 +86,7 @@ func (h *UserHandler) profileResponse(user *domain.User) dto.UserProfileResponse
 		Role:      user.Role,
 		AvatarURL: user.AvatarURL,
 		Bio:       user.Bio,
-		Streak:    h.calculateStreak(user.ID),
+		Streak:    user.StreakCount,
 		Points:    user.Points,
 		Preferences: dto.UserPreferencesResponseDTO{
 			PushEnabled:      prefs.Push(),
@@ -101,52 +105,6 @@ func boolOrDefault(v *bool) bool {
 	return *v
 }
 
-// Lógica de cálculo de dias consecutivos com postagens
-func (h *UserHandler) calculateStreak(userID uuid.UUID) int {
-	var postDates []time.Time
-
-	// Busca apenas a data (sem hora) dos posts do usuário, ordenados do mais recente ao mais antigo
-	h.DB.Model(&domain.Post{}).
-		Where("user_id = ?", userID).
-		Order("created_at DESC").
-		Pluck("DATE(created_at)", &postDates)
-
-	if len(postDates) == 0 {
-		return 0
-	}
-
-	now := time.Now().Truncate(24 * time.Hour)
-	latestPostDate := postDates[0].Truncate(24 * time.Hour)
-
-	// Se o post mais recente for anterior a ontem, o streak foi quebrado
-	daysDifference := int(now.Sub(latestPostDate).Hours() / 24)
-	if daysDifference > 1 {
-		return 0
-	}
-
-	streak := 0
-	checkDate := latestPostDate
-
-	// Mapeia datas únicas em que o usuário postou
-	dateSet := make(map[string]bool)
-	for _, dt := range postDates {
-		dateSet[dt.Format("2006-01-02")] = true
-	}
-
-	// Incrementa enquanto houver post no dia consecutivo anterior
-	for {
-		dateStr := checkDate.Format("2006-01-02")
-		if dateSet[dateStr] {
-			streak++
-			checkDate = checkDate.AddDate(0, 0, -1)
-		} else {
-			break
-		}
-	}
-
-	return streak
-}
-
 // GetRanking retorna a lista de usuários ordenada pelo maior streak
 func (h *UserHandler) GetRanking(c *gin.Context) {
 	var users []domain.User
@@ -161,7 +119,11 @@ func (h *UserHandler) GetRanking(c *gin.Context) {
 	var ranking []dto.UserRankingDTO
 
 	for _, user := range users {
-		streak := h.calculateStreak(user.ID)
+		// Mesma ofensiva do perfil: derivada dos dias completos de cada usuário.
+		streak := user.StreakCount
+		if state, err := service.SyncUserDays(h.DB, user.ID); err == nil {
+			streak = state.Streak
+		}
 
 		// Opcional: Descomente a linha abaixo se quiser exibir apenas usuários com streak > 0
 		// if streak == 0 { continue }
@@ -346,11 +308,16 @@ func (h *UserHandler) GetStreak(c *gin.Context) {
 		return
 	}
 
-	// Executa o cálculo baseado nas postagens
-	streak := h.calculateStreak(user.ID)
+	// A ofensiva é derivada dos dias em que o usuário fechou 100% de um dia de
+	// alimentação E 100% de uma sessão de treino.
+	state, err := service.SyncUserDays(h.DB, user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao calcular a ofensiva"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"user_id": user.ID,
-		"streak":  streak,
+		"streak":  state.Streak,
 	})
 }

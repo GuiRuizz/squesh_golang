@@ -9,6 +9,7 @@ import (
 
 	"squesh_golang/internal/domain"
 	"squesh_golang/internal/dto"
+	"squesh_golang/internal/service"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -21,6 +22,15 @@ type TrailHandler struct {
 
 func NewTrailHandler(db *gorm.DB) *TrailHandler {
 	return &TrailHandler{DB: db}
+}
+
+// syncDays consolida os dias do usuário antes de ler/gravar progresso: apaga o
+// que ficou pela metade nos dias passados (os selects voltam a ficar
+// desmarcados) e recalcula a ofensiva. É idempotente e barato quando não há
+// nada a limpar.
+func (h *TrailHandler) syncDays(userID uuid.UUID) error {
+	_, err := service.SyncUserDays(h.DB, userID)
+	return err
 }
 
 // ListTrails busca todas as trilhas ou filtra por tipo (?type=workout ou ?type=nutrition)
@@ -62,6 +72,11 @@ func (h *TrailHandler) GetTrailByID(c *gin.Context) {
 	// faltam e a flag "completed" em cada item). Sem token, o GET continua
 	// público como antes.
 	if userID, ok := optionalUserID(c); ok {
+		if err := h.syncDays(userID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao consolidar o progresso diário"})
+			return
+		}
+
 		checks, err := h.userStepChecks(userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao calcular progresso"})
@@ -312,31 +327,10 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 			return err
 		}
 
-		// Lógica de cálculo da Streak diária
+		// A ofensiva NÃO é incrementada aqui: ela é derivada dos dias completos
+		// (alimentação E treino 100%), recalculada em service.SyncUserDays. Este
+		// handler só registra a atividade e os pontos.
 		now := time.Now()
-		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-
-		if updatedUser.LastActiveDate == nil {
-			// Primeira conclusão registrada no app
-			updatedUser.StreakCount = 1
-		} else {
-			lastActive := *updatedUser.LastActiveDate
-			lastActiveDay := time.Date(lastActive.Year(), lastActive.Month(), lastActive.Day(), 0, 0, 0, 0, lastActive.Location())
-
-			daysDiff := int(today.Sub(lastActiveDay).Hours() / 24)
-
-			switch {
-			case daysDiff == 1:
-				// Atividade no dia consecutivo -> Incrementa Streak
-				updatedUser.StreakCount++
-			case daysDiff > 1:
-				// Quebra na sequência de dias -> Reseta para 1
-				updatedUser.StreakCount = 1
-				// daysDiff == 0 -> Já completou algum item hoje, mantém a streak igual
-			}
-		}
-
-		// Atualiza o LastActiveDate e pontuação
 		updatedUser.LastActiveDate = &now
 		updatedUser.Points += 10
 
@@ -352,10 +346,16 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 		return
 	}
 
+	// Recalcula a ofensiva já considerando a conclusão recém-gravada.
+	streak := updatedUser.StreakCount
+	if state, syncErr := service.SyncUserDays(h.DB, userID); syncErr == nil {
+		streak = state.Streak
+	}
+
 	// 4. Retorna a resposta ao frontend
 	c.JSON(http.StatusOK, gin.H{
 		"message":      "Item concluído com sucesso!",
-		"streak_count": updatedUser.StreakCount,
+		"streak_count": streak,
 		"points":       updatedUser.Points,
 	})
 }
@@ -406,6 +406,13 @@ func (h *TrailHandler) ToggleStepCheck(c *gin.Context) {
 	_ = c.ShouldBindJSON(&payload)
 	if payload.StepIndex == nil {
 		payload.StepIndex = payload.MealIndex
+	}
+
+	// Fecha os dias anteriores antes de mexer no progresso de hoje: se ontem
+	// ficou pela metade, os selects de ontem voltam a ficar desmarcados.
+	if err := h.syncDays(userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao consolidar o progresso diário"})
+		return
 	}
 
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
@@ -746,6 +753,12 @@ func applyItemProgress(item *domain.TrailItem, checks map[int]bool) bool {
 // usuário já concluiu, o total e o próximo item não concluído. Em itens com
 // etapas internas, só conta como concluído com TODAS as etapas marcadas.
 func (h *TrailHandler) computeUserProgress(userID uuid.UUID) ([]trailUserProgress, error) {
+	// Consolida os dias passados antes de ler: o progresso parcial de um dia que
+	// não fechou é descartado, então os selects do app já voltam desmarcados.
+	if _, err := service.SyncUserDays(h.DB, userID); err != nil {
+		return nil, err
+	}
+
 	checks, err := h.userStepChecks(userID)
 	if err != nil {
 		return nil, err
