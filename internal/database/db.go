@@ -28,20 +28,52 @@ func InitDB() *gorm.DB {
 		log.Fatalf("Erro ao conectar no banco via GORM: %v", err)
 	}
 
+	// Migrações manuais ANTES do AutoMigrate (idempotentes): o modelo
+	// padronizou "meal" para "step" (uma etapa pode ser um dia de alimentação
+	// ou uma sessão de treino), então renomeamos as colunas sem perder dado.
+	// Se a coluna antiga não existir (banco novo), não há nada a fazer.
+	renames := []struct{ table, from, to string }{
+		{"trail_items", "meals", "steps"},
+		{"user_trail_progresses", "meal_index", "step_index"},
+	}
+	for _, r := range renames {
+		stmt := fmt.Sprintf(`DO $$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = '%s' AND column_name = '%s'
+			) AND NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = '%s' AND column_name = '%s'
+			) THEN
+				ALTER TABLE %s RENAME COLUMN %s TO %s;
+			END IF;
+		END $$;`, r.table, r.from, r.table, r.to, r.table, r.from, r.to)
+		if err := db.Exec(stmt).Error; err != nil {
+			log.Fatalf("Erro ao renomear %s.%s para %s: %v", r.table, r.from, r.to, err)
+		}
+	}
+
 	// O AutoMigrate adiciona tabelas e novas colunas (como role em User, Trail e TrailItem)
 	err = db.AutoMigrate(domain.GetModels()...)
 	if err != nil {
 		log.Fatalf("Erro ao executar AutoMigrate: %v", err)
 	}
 
-	// Migração manual: o progresso passou a ser por refeição (meal_index), então
-	// o índice único antigo (user_id, trail_item_id) bloquearia o 2º check do dia.
-	// O AutoMigrate cria o novo (idx_user_item_meal), mas não remove o legado.
-	if err := db.Exec("DROP INDEX IF EXISTS idx_user_item").Error; err != nil {
-		log.Fatalf("Erro ao remover o índice legado idx_user_item: %v", err)
+	// Limpeza de índices únicos legados do progresso: ele era único por
+	// (user_id, trail_item_id), o que bloqueava a 2ª etapa do dia/da sessão.
+	// O AutoMigrate cria o novo (idx_user_item_step), mas não remove os antigos.
+	for _, legacy := range []string{"idx_user_item", "idx_user_item_meal"} {
+		if err := db.Exec("DROP INDEX IF EXISTS " + legacy).Error; err != nil {
+			log.Fatalf("Erro ao remover o índice legado %s: %v", legacy, err)
+		}
 	}
 
 	fmt.Println("Conexão e AutoMigrate do [squesh_golang] executados com sucesso!")
+
+	// Catálogo de planos: idempotente, só cria o que falta.
+	seedPlans(db)
+
 	return db
 }
 

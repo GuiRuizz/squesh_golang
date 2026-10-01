@@ -16,5 +16,9 @@ func GetModels() []interface{} {
 		&ShopItem{},
 		&UserInventory{},
 		&Notification{},
+		&Plan{},
+		&UserSubscription{},
+		&PaymentMethod{},
+		&Address{},
 	}
 }
