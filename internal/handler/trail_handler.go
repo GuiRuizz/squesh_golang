@@ -62,7 +62,7 @@ func (h *TrailHandler) GetTrailByID(c *gin.Context) {
 	// faltam e a flag "completed" em cada item). Sem token, o GET continua
 	// público como antes.
 	if userID, ok := optionalUserID(c); ok {
-		checks, err := h.userMealChecks(userID)
+		checks, err := h.userStepChecks(userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao calcular progresso"})
 			return
@@ -255,10 +255,20 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 			return fmt.Errorf("item da trilha não encontrado")
 		}
 
+		// Itens com etapas internas (dia de alimentação / sessão de treino) são
+		// concluídos parte a parte em /trails/items/:id/steps, não por aqui.
+		// A guarda vem ANTES das demais para o erro ser sempre o correto.
+		if len(item.Steps) > 0 {
+			return fmt.Errorf(
+				"este item tem %d etapas: marque cada uma em /trails/items/%s/steps",
+				len(item.Steps), itemID,
+			)
+		}
+
 		// Verifica se o usuário já concluiu esse item
 		var count int64
 		if err := tx.Model(&domain.UserTrailProgress{}).
-			Where("user_id = ? AND trail_item_id = ?", userID, itemID).
+			Where("user_id = ? AND trail_item_id = ? AND step_index = -1", userID, itemID).
 			Count(&count).Error; err != nil {
 			return err
 		}
@@ -274,15 +284,6 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 			return fmt.Errorf("trilha do item não encontrada")
 		}
 
-		// Dias de alimentação são concluídos refeição adigestura
-		// (PATCH /trails/items/:id/meals), não por este endpoint.
-		if itemTrail.Type == domain.TrailTypeNutrition && len(item.Meals) > 0 {
-			return fmt.Errorf(
-				"este item é um dia de alimentação: marque as refeições em /trails/items/%s/meals",
-				itemID,
-			)
-		}
-
 		reached, err := dailyLimitReachedExcept(tx, userID, itemTrail.Type, item.ID)
 		if err != nil {
 			return err
@@ -295,11 +296,11 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 		}
 
 		// Registra a conclusão na tabela de progresso.
-		// MealIndex = -1: item simples (treino), sem refeições.
+		// StepIndex = -1: item simples, sem etapas internas.
 		progress := domain.UserTrailProgress{
 			UserID:      userID,
 			TrailItemID: itemID,
-			MealIndex:   -1,
+			StepIndex:   -1,
 			CompletedAt: time.Now(),
 		}
 		if err := tx.Create(&progress).Error; err != nil {
@@ -359,8 +360,10 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 	})
 }
 
-// ToggleMealCheck alterna o status de conclusão de uma refeição/item de nutrição
-func (h *TrailHandler) ToggleMealCheck(c *gin.Context) {
+// ToggleStepCheck marca/desmarca UMA etapa interna de um item: uma refeição do
+// dia (nutrição) ou um exercício da sessão (treino). A etapa (dia/sessão) só
+// conta como concluída quando todas as suas partes estão marcadas.
+func (h *TrailHandler) ToggleStepCheck(c *gin.Context) {
 	userIDVal, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
@@ -392,50 +395,52 @@ func (h *TrailHandler) ToggleMealCheck(c *gin.Context) {
 
 	var isChecked bool
 
-	// Corpo OPCIONAL: { "meal_index": 0, "checked": true }
-	//   - meal_index: qual refeição do dia (obrigatório quando o dia tem refeições)
+	// Corpo OPCIONAL: { "step_index": 0, "checked": true }
+	//   - step_index: qual etapa do dia/sessão (obrigatório quando há etapas)
 	//   - checked:    estado desejado; se ausente, alterna (toggle)
 	var payload struct {
-		MealIndex *int  `json:"meal_index"`
+		StepIndex *int  `json:"step_index"`
+		MealIndex *int  `json:"meal_index"` // aceito por compatibilidade com o app antigo
 		Checked   *bool `json:"checked"`
 	}
 	_ = c.ShouldBindJSON(&payload)
+	if payload.StepIndex == nil {
+		payload.StepIndex = payload.MealIndex
+	}
 
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
-		// Busca o item juntamente com a trilha pai para validar o tipo
+		// Busca o item juntamente com a trilha pai (para o limite diário)
 		var item domain.TrailItem
 		if err := tx.Preload("Trail").First(&item, "id = ?", itemID).Error; err != nil {
 			return fmt.Errorf("item não encontrado")
 		}
 
-		// Verifica se o item pertence a uma trilha de nutrição
 		var trail domain.Trail
 		if err := tx.First(&trail, "id = ?", item.TrailID).Error; err != nil {
 			return fmt.Errorf("trilha associada não encontrada")
 		}
 
-		if trail.Type != domain.TrailTypeNutrition {
-			return fmt.Errorf("o item informado não pertence a uma trilha de nutrição")
+		// Resolve a etapa alvo: um item com Steps exige step_index; itens
+		// antigos (sem etapas) usam o modo simples (-1).
+		stepIndex := -1
+		if len(item.Steps) > 0 {
+			if payload.StepIndex == nil {
+				return fmt.Errorf("informe step_index com a etapa que deseja marcar")
+			}
+			stepIndex = *payload.StepIndex
+			if stepIndex < 0 || stepIndex >= len(item.Steps) {
+				return fmt.Errorf(
+					"step_index inválido: %s tem %d etapas",
+					trail.Type, len(item.Steps),
+				)
+			}
 		}
 
-		// Resolve a refeição alvo: um DIA com Meals exige meal_index; itens
-		// antigos (sem refeições) usam o modo simples (-1).
-		mealIndex := -1
-		if len(item.Meals) > 0 {
-			if payload.MealIndex == nil {
-				return fmt.Errorf("informe meal_index com a refeição do dia que deseja marcar")
-			}
-			mealIndex = *payload.MealIndex
-			if mealIndex < 0 || mealIndex >= len(item.Meals) {
-				return fmt.Errorf("meal_index inválido: este dia tem %d refeições", len(item.Meals))
-			}
-		}
-
-		// Estado atual daquela refeição específica
+		// Estado atual daquela etapa específica
 		var progress domain.UserTrailProgress
 		findErr := tx.Where(
-			"user_id = ? AND trail_item_id = ? AND meal_index = ?",
-			userID, itemID, mealIndex,
+			"user_id = ? AND trail_item_id = ? AND step_index = ?",
+			userID, itemID, stepIndex,
 		).First(&progress).Error
 		if findErr != nil && findErr != gorm.ErrRecordNotFound {
 			return findErr
@@ -448,29 +453,30 @@ func (h *TrailHandler) ToggleMealCheck(c *gin.Context) {
 		}
 
 		if wantChecked && !found {
-			// Regra de negócio: 1 DIA de alimentação por dia. Seguir marcando as
-			// demais refeições do MESMO dia é livre; começar OUTRO dia hoje, não.
+			// Regra de negócio: 1 etapa do dia por tipo de trilha. Seguir marcando
+			// as demais etapas do MESMO dia/sessão é livre; começar OUTRO hoje, não.
 			reached, dailyErr := dailyLimitReachedExcept(tx, userID, trail.Type, item.ID)
 			if dailyErr != nil {
 				return dailyErr
 			}
 			if reached {
 				return fmt.Errorf(
-					"limite diário atingido: você já começou o dia de alimentação de hoje. Volte amanhã!",
+					"limite diário atingido: você já começou o %s de hoje. Volte amanhã!",
+					dailyStepLabel(trail.Type),
 				)
 			}
 
 			newProgress := domain.UserTrailProgress{
 				UserID:      userID,
 				TrailItemID: itemID,
-				MealIndex:   mealIndex,
+				StepIndex:   stepIndex,
 				CompletedAt: time.Now(),
 			}
 			if err := tx.Create(&newProgress).Error; err != nil {
 				return err
 			}
 		} else if !wantChecked && found {
-			// Desmarcar a refeição (sempre permitido) libera a marcação
+			// Desmarcar a etapa (sempre permitido) libera a marcação
 			if err := tx.Delete(&progress).Error; err != nil {
 				return err
 			}
@@ -486,7 +492,7 @@ func (h *TrailHandler) ToggleMealCheck(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Status da refeição alterado com sucesso",
+		"message": "Status da etapa alterado com sucesso",
 		"checked": isChecked,
 	})
 }
@@ -672,10 +678,10 @@ type trailUserProgress struct {
 	nextItem  *domain.TrailItem
 }
 
-// userMealChecks devolve, por item, o conjunto de índices de refeição já
-// marcados pelo usuário. Para itens sem refeições (treinos), o único índice
-// válido é -1. É a base de todo o cálculo de progresso do app.
-func (h *TrailHandler) userMealChecks(userID uuid.UUID) (map[uuid.UUID]map[int]bool, error) {
+// userStepChecks devolve, por item, o conjunto de índices de etapa já
+// marcados pelo usuário. Para itens sem etapas internas, o único índice válido
+// é -1. É a base de todo o cálculo de progresso do app.
+func (h *TrailHandler) userStepChecks(userID uuid.UUID) (map[uuid.UUID]map[int]bool, error) {
 	var progresses []domain.UserTrailProgress
 	if err := h.DB.Where("user_id = ?", userID).Find(&progresses).Error; err != nil {
 		return nil, err
@@ -688,30 +694,30 @@ func (h *TrailHandler) userMealChecks(userID uuid.UUID) (map[uuid.UUID]map[int]b
 			set = make(map[int]bool, 1)
 			checks[p.TrailItemID] = set
 		}
-		set[p.MealIndex] = true
+		set[p.StepIndex] = true
 	}
 	return checks, nil
 }
 
-// itemMealsRequired devolve quantas "conclusões" o item exige: 1 para itens
-// simples (treinos) e uma por refeição para dias de nutrição.
-func itemMealsRequired(item *domain.TrailItem) int {
-	if len(item.Meals) == 0 {
+// itemStepsRequired devolve quantas "conclusões" o item exige: 1 para itens
+// simples e uma por etapa interna (refeições do dia / exercícios da sessão).
+func itemStepsRequired(item *domain.TrailItem) int {
+	if len(item.Steps) == 0 {
 		return 1
 	}
-	return len(item.Meals)
+	return len(item.Steps)
 }
 
-// itemProgressCount conta quantas refeições/etapas do item já foram marcadas.
+// itemProgressCount conta quantas etapas do item já foram marcadas.
 func itemProgressCount(item *domain.TrailItem, checks map[int]bool) int {
-	if len(item.Meals) == 0 {
+	if len(item.Steps) == 0 {
 		if checks[-1] {
 			return 1
 		}
 		return 0
 	}
 	count := 0
-	for i := range item.Meals {
+	for i := range item.Steps {
 		if checks[i] {
 			count++
 		}
@@ -719,28 +725,28 @@ func itemProgressCount(item *domain.TrailItem, checks map[int]bool) int {
 	return count
 }
 
-// applyItemProgress preenche as flags transitórias do item (completed e o
-// consumed de cada refeição) e devolve se o item está concluído.
+// applyItemProgress preenche as flags transitórias do item (completed e o done
+// de cada etapa) e devolve se o item está concluído.
 func applyItemProgress(item *domain.TrailItem, checks map[int]bool) bool {
-	required := itemMealsRequired(item)
+	required := itemStepsRequired(item)
 	count := itemProgressCount(item, checks)
 	done := count >= required
 
 	completed := done
 	item.Completed = &completed
 
-	for i := range item.Meals {
-		consumed := checks[i]
-		item.Meals[i].Consumed = &consumed
+	for i := range item.Steps {
+		stepDone := checks[i]
+		item.Steps[i].Done = &stepDone
 	}
 	return done
 }
 
 // computeUserProgress calcula, para cada trilha existente, quantos itens o
-// usuário já concluiu, o total e o próximo item não concluído. Em dias de
-// nutrição, o item só conta como concluído com TODAS as refeições marcadas.
+// usuário já concluiu, o total e o próximo item não concluído. Em itens com
+// etapas internas, só conta como concluído com TODAS as etapas marcadas.
 func (h *TrailHandler) computeUserProgress(userID uuid.UUID) ([]trailUserProgress, error) {
-	checks, err := h.userMealChecks(userID)
+	checks, err := h.userStepChecks(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -922,16 +928,25 @@ func dailyLabel(trailType domain.TrailType) string {
 	return "alimentação"
 }
 
+// dailyStepLabel devolve o rótulo da ETAPA do dia (a sessão de treino ou o dia
+// de alimentação) usado nas mensagens do toggle interno.
+func dailyStepLabel(trailType domain.TrailType) string {
+	if trailType == domain.TrailTypeWorkout {
+		return "treino"
+	}
+	return "dia de alimentação"
+}
+
 // completionsTodayByType devolve quantas etapas o usuário CONCLUIU hoje
-// (um dia de nutrição só conta com todas as refeições marcadas), agrupado
-// por tipo de trilha. Alimenta o `today_completed` da Home.
+// (um dia de alimentação ou uma sessão de treino só conta com todas as partes
+// marcadas), agrupado por tipo de trilha. Alimenta o `today_completed` da Home.
 func (h *TrailHandler) completionsTodayByType(userID uuid.UUID) (map[domain.TrailType]int, error) {
 	now := time.Now()
 	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 
 	// Um item está concluído quando tem linhas de progresso >= GREATEST(1, nº de
-	// refeições). Workout tem 0 refeições -> precisa de 1 linha; dia de
-	// nutrição com 4 refeições -> precisa das 4.
+	// etapas internas). Item simples -> precisa de 1 linha; dia/sessão com 5
+	// etapas -> precisa das 5.
 	var rows []struct {
 		Type   domain.TrailType
 		ItemID uuid.UUID
@@ -942,8 +957,8 @@ func (h *TrailHandler) completionsTodayByType(userID uuid.UUID) (map[domain.Trai
 		 JOIN trail_items ON trail_items.id = utp.trail_item_id
 		 JOIN trails ON trails.id = trail_items.trail_id
 		 WHERE utp.user_id = ?
-		 GROUP BY trails.type, utp.trail_item_id, trail_items.meals
-		 HAVING COUNT(*) >= GREATEST(1, jsonb_array_length(COALESCE(trail_items.meals, '[]'::jsonb)))
+		 GROUP BY trails.type, utp.trail_item_id, trail_items.steps
+		 HAVING COUNT(*) >= GREATEST(1, jsonb_array_length(COALESCE(trail_items.steps, '[]'::jsonb)))
 		    AND MAX(utp.completed_at) >= ?`,
 		userID, start,
 	).Scan(&rows).Error
