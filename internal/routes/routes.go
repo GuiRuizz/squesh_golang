@@ -24,6 +24,7 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 	userHandler := handler.NewUserHandler(db)
 	followHandler := handler.NewFollowHandler(db)
 	shopHandler := handler.NewShopHandler(db, notifService)
+	billingHandler := handler.NewBillingHandler(db, notifService)
 	notificationHandler := handler.NewNotificationHandler(db)
 	uploadHandler := handler.NewUploadHandler(store)
 
@@ -53,6 +54,9 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 		// Catálogo da Loja (Leitura Pública)
 		v1.GET("/shop", shopHandler.GetItems)
 		v1.GET("/shop/:id", shopHandler.GetItemByID)
+
+		// Vitrine de planos (público: o app mostra os preços antes do login)
+		v1.GET("/plans", billingHandler.ListPlans)
 
 		// Upload de arquivos: o app faz o PUT direto na URL assinada
 		// (a assinatura na query string é a autenticação — sem JWT aqui).
@@ -88,9 +92,10 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 				trails.GET("/me/completed", trailHandler.GetMyCompletedTrails) // <--- Novo: trilhas concluídas
 				trails.POST("/generate", trailHandler.GenerateCompleteTrail)   // <--- Novo: gera trilha COMPLETA
 				trails.POST("/:id/generate", trailHandler.GenerateInfiniteItems)
-				trails.POST("/items/:itemId/complete", trailHandler.CompleteTrailItem)        // <--- Novo
-				trails.PATCH("/items/:itemId/meals", trailHandler.ToggleMealCheck)            // <--- Novo: marca/desmarca refeição (sem índice)
-				trails.PATCH("/items/:itemId/meals/:mealIndex", trailHandler.ToggleMealCheck) // mantido por compatibilidade (índice é ignorado)
+				trails.POST("/items/:itemId/complete", trailHandler.CompleteTrailItem)  // conclui item SEM etapas internas
+				trails.PATCH("/items/:itemId/steps", trailHandler.ToggleStepCheck)  // marca/desmarca UMA etapa (refeição ou exercício)
+				// Alias legado: o app anterior chamava /meals (o body aceita meal_index).
+				trails.PATCH("/items/:itemId/meals", trailHandler.ToggleStepCheck)
 			}
 
 			// Usuários & Profile
@@ -98,9 +103,27 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 			{
 				users.GET("/me", userHandler.GetProfile)
 				users.GET("/me/streak", userHandler.GetStreak) // <--- Novo
+				users.GET("/me/posts", postHandler.GetMyPosts) // <--- tela "Meus Posts"
 				users.GET("/ranking", userHandler.GetRanking)
 				users.PUT("/me", userHandler.UpdateProfile)
+				users.PUT("/me/preferences", userHandler.UpdatePreferences)
 				users.PATCH("/me/password", userHandler.UpdatePassword)
+			}
+
+			// Assinatura, formas de pagamento e endereços
+			users.GET("/me/subscription", billingHandler.GetMySubscription)
+			users.POST("/me/subscription", billingHandler.Subscribe)
+			users.DELETE("/me/subscription", billingHandler.CancelSubscription)
+			{
+				users.GET("/me/payment-methods", billingHandler.ListPaymentMethods)
+				users.POST("/me/payment-methods", billingHandler.CreatePaymentMethod)
+				users.PUT("/me/payment-methods/:methodId", billingHandler.UpdatePaymentMethod)
+				users.DELETE("/me/payment-methods/:methodId", billingHandler.DeletePaymentMethod)
+
+				users.GET("/me/addresses", billingHandler.ListAddresses)
+				users.POST("/me/addresses", billingHandler.CreateAddress)
+				users.PUT("/me/addresses/:addressId", billingHandler.UpdateAddress)
+				users.DELETE("/me/addresses/:addressId", billingHandler.DeleteAddress)
 			}
 
 			// Postagens & Comentários
