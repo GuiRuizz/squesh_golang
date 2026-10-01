@@ -1,8 +1,11 @@
 package handler
 
 import (
-	"github.com/google/uuid"
+	"errors"
+	"fmt"
 	"net/http"
+
+	"github.com/google/uuid"
 
 	"squesh_golang/internal/domain"
 	"squesh_golang/internal/dto"
@@ -141,39 +144,138 @@ func (h *PostHandler) GetUserPosts(c *gin.Context) {
 	c.JSON(http.StatusOK, posts)
 }
 
-type UpdateCaptionDTO struct {
-	Caption string `json:"caption" binding:"required"`
+// GetMyPosts (GET /users/me/posts) alimenta a tela "Meus Posts" das
+// configurações. O dono vem do token — nunca de parâmetro — e o resultado
+// traz os comentários com o autor, para a tela conseguir listar/apagar.
+func (h *PostHandler) GetMyPosts(c *gin.Context) {
+	userID, ok := requireUserID(c)
+	if !ok {
+		return
+	}
+
+	var posts []domain.Post
+	if err := h.DB.Where("user_id = ?", userID).
+		Preload("User").Preload("Comments.User").
+		Order("created_at desc").Find(&posts).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao buscar seus posts"})
+		return
+	}
+	if posts == nil {
+		posts = []domain.Post{}
+	}
+
+	pp := make([]*domain.Post, len(posts))
+	for i := range posts {
+		pp[i] = &posts[i]
+	}
+	// Feed sem curtidas é diferente: o card de "Meus Posts" também mostra likes.
+	h.enrichPosts(pp, &userID)
+
+	c.JSON(http.StatusOK, posts)
 }
 
-func (h *PostHandler) UpdatePostCaption(c *gin.Context) {
-	postID := c.Param("id")
-	var dto UpdateCaptionDTO
+// UpdateCaptionDTO aceita legenda vazia de propósito: limpar a legenda é
+// uma edição legítima (o app permite). O limite é o mesmo do app (2200).
+type UpdateCaptionDTO struct {
+	Caption string `json:"caption"`
+}
 
-	if err := c.ShouldBindJSON(&dto); err != nil {
+const maxCaptionLength = 2200
+
+func (h *PostHandler) UpdatePostCaption(c *gin.Context) {
+	// Sem esse Parse o "id = ?" manda texto para uma coluna uuid e o Postgres
+	// responde erro de cast, que virava 500 em vez de 400.
+	postID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID de post inválido"})
+		return
+	}
+
+	var body UpdateCaptionDTO
+
+	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Dados inválidos"})
+		return
+	}
+	if len([]rune(body.Caption)) > maxCaptionLength {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("A legenda pode ter no máximo %d caracteres", maxCaptionLength),
+		})
+		return
+	}
+
+	userID, ok := requireUserID(c)
+	if !ok {
+		return
+	}
+
+	// Só o dono edita. Sem esta checagem qualquer usuário logado mudava a
+	// legenda de qualquer post pelo ID.
+	result := h.DB.Model(&domain.Post{}).
+		Where("id = ? AND user_id = ?", postID, userID).
+		Update("caption", body.Caption)
+
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Falha ao editar o post"})
+		return
+	}
+	if result.RowsAffected == 0 {
+		// Não distingue "não existe" de "não é seu" de propósito: confirmar a
+		// existência do post alheio já é vazar informação.
+		c.JSON(http.StatusNotFound, gin.H{"error": "Post não encontrado"})
 		return
 	}
 
 	var post domain.Post
-	if err := h.DB.First(&post, "id = ?", postID).Error; err != nil {
+	if err := h.DB.Preload("User").First(&post, "id = ?", postID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Post não encontrado"})
 		return
 	}
 
-	h.DB.Model(&post).Update("caption", dto.Caption)
+	// likes_count é virtual no domain.Post; a tela recarrega a lista, mas
+	// devolver o post já com o número evita a diferença visual.
+	h.enrichPosts([]*domain.Post{&post}, &userID)
+
 	c.JSON(http.StatusOK, post)
 }
 
 func (h *PostHandler) DeletePost(c *gin.Context) {
-	postID := c.Param("id")
-	result := h.DB.Delete(&domain.Post{}, "id = ?", postID)
-
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Falha ao apagar o post"})
+	postID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID de post inválido"})
 		return
 	}
-	if result.RowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Post não encontrado"})
+
+	userID, ok := requireUserID(c)
+	if !ok {
+		return
+	}
+
+	// Apagar também leva junto curtidas e comentários: sem cascata eles
+	// viravam linhas órfãs apontando para um post inexistente.
+	// O `err` de cima (do uuid.Parse) ja foi tratado e devolvido; aqui o
+	// nome e reatribuido para o erro da transacao.
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Delete(&domain.Post{}, "id = ? AND user_id = ?", postID, userID)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+
+		if err := tx.Where("post_id = ?", postID).Delete(&domain.PostLike{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("post_id = ?", postID).Delete(&domain.Comment{}).Error
+	})
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Post não encontrado"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Falha ao apagar o post"})
 		return
 	}
 
@@ -181,28 +283,22 @@ func (h *PostHandler) DeletePost(c *gin.Context) {
 }
 
 func (h *PostHandler) CreatePost(c *gin.Context) {
-	var input dto.CreatePostDTO
+	// Autor = usuário logado (vem do token). Antes o corpo mandava user_id e
+	// qualquer um podia publicar como outra pessoa.
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
+		return
+	}
 
+	var input dto.CreatePostDTO
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	parsedUserID, err := uuid.Parse(input.UserID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "ID de usuário inválido"})
-		return
-	}
-
-	// Valida se o usuário existe no banco
-	var user domain.User
-	if err := h.DB.First(&user, "id = ?", parsedUserID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Usuário não encontrado"})
-		return
-	}
-
 	post := domain.Post{
-		UserID:   parsedUserID,
+		UserID:   userID,
 		ImageURL: input.ImageURL,
 		Caption:  input.Caption,
 	}
@@ -216,7 +312,7 @@ func (h *PostHandler) CreatePost(c *gin.Context) {
 	h.DB.Preload("User").First(&post, "id = ?", post.ID)
 
 	// Preenche curtidas do post recém-criado (0 likes, liked_by_me = false)
-	h.enrichPosts([]*domain.Post{&post}, &parsedUserID)
+	h.enrichPosts([]*domain.Post{&post}, &userID)
 
 	c.JSON(http.StatusCreated, post)
 }
