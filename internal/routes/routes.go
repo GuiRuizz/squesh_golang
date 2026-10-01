@@ -27,6 +27,7 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 	billingHandler := handler.NewBillingHandler(db, notifService)
 	notificationHandler := handler.NewNotificationHandler(db)
 	uploadHandler := handler.NewUploadHandler(store)
+	arenaHandler := handler.NewArenaHandler(db)
 
 	v1 := r.Group("/api/v1")
 	{
@@ -82,6 +83,15 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 				orders.POST("/:orderId/cancel", shopHandler.CancelOrder)
 			}
 			protected.GET("/shop/inventory", shopHandler.GetUserInventory)
+
+			// Arena de Ligas: o ranking com corte (Bronze -> Diamante), zona de
+			// promoção/rebaixamento e o resumo pessoal. O `period` separa o
+			// recorte (week/month/all) sem mudar de endpoint.
+			arena := protected.Group("/arena")
+			{
+				arena.GET("", arenaHandler.GetBoard)
+				arena.GET("/me", arenaHandler.GetMyStatus)
+			}
 
 			// Central de Notificações
 			notifications := protected.Group("/notifications")

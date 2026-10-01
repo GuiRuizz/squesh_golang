@@ -22,5 +22,6 @@ func GetModels() []interface{} {
 		&UserSubscription{},
 		&PaymentMethod{},
 		&Address{},
+		&XPEvent{},
 	}
 }

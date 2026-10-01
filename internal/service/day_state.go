@@ -54,6 +54,28 @@ type progressRow struct {
 	CompletedAt time.Time        `gorm:"column:completed_at"`
 }
 
+// SyncAndReward consolida os dias do usuário, recalcula a ofensiva E credita o
+// XP da Arena.
+//
+// É o ponto de entrada que o resto do app deve usar: os dois passos leem os
+// mesmos dias completos, então roda-los juntos garante que não existe caminho em
+// que um dia valeu para a ofensiva mas não rendeu XP (ou o contrário).
+//
+// A diferença para `SyncUserDays` é sutil e importa: a rotina de dias também
+// DELETA o progresso parcial dos dias passados, então rodar os dois separados
+// abriria uma janela em que o dia existia para um e não para o outro.
+func SyncAndReward(db *gorm.DB, userID uuid.UUID) (DayStateSync, int, error) {
+	state, err := SyncUserDays(db, userID)
+	if err != nil {
+		return state, 0, err
+	}
+	gained, err := SyncDayRewards(db, userID)
+	if err != nil {
+		return state, 0, err
+	}
+	return state, gained, nil
+}
+
 // SyncUserDays consolida os dias do usuário e recalcula a ofensiva.
 //
 // Regras:

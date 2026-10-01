@@ -28,8 +28,14 @@ func NewTrailHandler(db *gorm.DB) *TrailHandler {
 // que ficou pela metade nos dias passados (os selects voltam a ficar
 // desmarcados) e recalcula a ofensiva. É idempotente e barato quando não há
 // nada a limpar.
+// syncDays consolida os dias do usuário E credita o XP da Arena.
+//
+// Um único ponto de chamada de propósito: os dois passos dependem dos mesmos
+// dias completos, e a rotina de dias deleta o progresso parcial do passado —
+// se algum chamador usasse `SyncUserDays` direto, o dia poderia valer para a
+// ofensiva sem ter rendido XP.
 func (h *TrailHandler) syncDays(userID uuid.UUID) error {
-	_, err := service.SyncUserDays(h.DB, userID)
+	_, _, err := service.SyncAndReward(h.DB, userID)
 	return err
 }
 
@@ -261,6 +267,8 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 	}
 
 	var updatedUser domain.User
+	// itemXP é o XP creditado pela conclusão deste item (0 se já estava pago).
+	var itemXP int
 
 	// 3. Executa as validações e gravações dentro de uma Transação do Banco
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
@@ -322,6 +330,20 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 			return err
 		}
 
+		// XP do item concluído. A chave única (usuário, tipo, item, dia) impede
+		// que o mesmo item pague de novo no mesmo dia.
+		itemXP, err = service.AwardXP(
+			tx, userID,
+			domain.XPEventItemComplete,
+			itemID.String(),
+			&itemID, string(itemTrail.Type),
+			time.Now(),
+			service.XPPerItemComplete,
+		)
+		if err != nil {
+			return err
+		}
+
 		// Busca os dados atuais do usuário com Lock (FOR UPDATE) para evitar race conditions
 		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&updatedUser, "id = ?", userID).Error; err != nil {
 			return err
@@ -329,10 +351,14 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 
 		// A ofensiva NÃO é incrementada aqui: ela é derivada dos dias completos
 		// (alimentação E treino 100%), recalculada em service.SyncUserDays. Este
-		// handler só registra a atividade e os pontos.
+		// handler só registra a atividade; o XP da Arena vem do razão em
+		// `user_xp_events`, não desta coluna.
+		//
+		// `points` continua existindo no usuário (o perfil mostra), mas a
+		// Ranking antigo lia daqui. Deixamos de somar para não haver dois
+		// contadores de XP discordando — o canônico é o razão.
 		now := time.Now()
 		updatedUser.LastActiveDate = &now
-		updatedUser.Points += 10
 
 		if err := tx.Save(&updatedUser).Error; err != nil {
 			return err
@@ -346,18 +372,35 @@ func (h *TrailHandler) CompleteTrailItem(c *gin.Context) {
 		return
 	}
 
-	// Recalcula a ofensiva já considerando a conclusão recém-gravada.
+	// Recalcula a ofensiva E credita o XP da Arena já considerando a conclusão
+	// recém-gravada (esta conclusão pode ter fechado um dia completo, que paga
+	// o XP do dia + bônus de ofensiva).
 	streak := updatedUser.StreakCount
-	if state, syncErr := service.SyncUserDays(h.DB, userID); syncErr == nil {
+	dayXP := 0
+	if state, gained, syncErr := service.SyncAndReward(h.DB, userID); syncErr == nil {
 		streak = state.Streak
+		dayXP = gained
 	}
 
+	// Total do usuário no razão: é o número que a Arena soma, então o app
+	// recebe o mesmo valor que o ranking vai mostrar.
+	var totalXP int
+	h.DB.Model(&domain.XPEvent{}).
+		Where("user_id = ?", userID).
+		Select("COALESCE(SUM(points), 0)").Scan(&totalXP)
+
 	// 4. Retorna a resposta ao frontend
-	c.JSON(http.StatusOK, gin.H{
+	gained := itemXP + dayXP
+	response := gin.H{
 		"message":      "Item concluído com sucesso!",
 		"streak_count": streak,
-		"points":       updatedUser.Points,
-	})
+		"points":       totalXP,
+		"xp":           gained,
+	}
+	if message := service.GrantMessage(gained); message != "" {
+		response["xp_message"] = message
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // ToggleStepCheck marca/desmarca UMA etapa interna de um item: uma refeição do
@@ -394,6 +437,8 @@ func (h *TrailHandler) ToggleStepCheck(c *gin.Context) {
 	}
 
 	var isChecked bool
+	// xpGained acumula o XP creditado nesta transação para voltar na resposta.
+	var xpGained int
 
 	// Corpo OPCIONAL: { "step_index": 0, "checked": true }
 	//   - step_index: qual etapa do dia/sessão (obrigatório quando há etapas)
@@ -482,6 +527,48 @@ func (h *TrailHandler) ToggleStepCheck(c *gin.Context) {
 			if err := tx.Create(&newProgress).Error; err != nil {
 				return err
 			}
+
+			// XP da etapa marcada. A chave única (usuário, tipo, item:etapa, dia)
+			// garante que desmarcar e remarcar no mesmo dia não pague de novo.
+			granted, grantErr := service.AwardXP(
+				tx, userID,
+				domain.XPEventStepCheck,
+				fmt.Sprintf("%s:%d", itemID, stepIndex),
+				&itemID, string(trail.Type),
+				time.Now(),
+				service.XPPerStepCheck,
+			)
+			if grantErr != nil {
+				return grantErr
+			}
+			xpGained += granted
+
+			// Se esta era a ÚLTIMA etapa que faltava, o item (dia/sessão) fechou:
+			// vale o bônus de item completo também.
+			var doneCount int64
+			if err := tx.Model(&domain.UserTrailProgress{}).
+				Where("user_id = ? AND trail_item_id = ?", userID, itemID).
+				Count(&doneCount).Error; err != nil {
+				return err
+			}
+			needed := len(item.Steps)
+			if needed == 0 {
+				needed = 1
+			}
+			if int(doneCount) >= needed {
+				granted, grantErr = service.AwardXP(
+					tx, userID,
+					domain.XPEventItemComplete,
+					itemID.String(),
+					&itemID, string(trail.Type),
+					time.Now(),
+					service.XPPerItemComplete,
+				)
+				if grantErr != nil {
+					return grantErr
+				}
+				xpGained += granted
+			}
 		} else if !wantChecked && found {
 			// Desmarcar a etapa (sempre permitido) libera a marcação
 			if err := tx.Delete(&progress).Error; err != nil {
@@ -498,10 +585,29 @@ func (h *TrailHandler) ToggleStepCheck(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	// Consolida os dias DEPOIS da transação: pode ser que esta etapa tenha
+	// fechado o dia (100% alimentação + treino), e aí o XP do dia e o bônus de
+	// ofensiva também entram antes de responder.
+	streak := 0
+	if state, syncErr := service.SyncUserDays(h.DB, userID); syncErr == nil {
+		streak = state.Streak
+	}
+	if dayXP, rewardErr := service.SyncDayRewards(h.DB, userID); rewardErr == nil {
+		xpGained += dayXP
+	}
+
+	response := gin.H{
 		"message": "Status da etapa alterado com sucesso",
 		"checked": isChecked,
-	})
+		"streak":  streak,
+		"xp":      xpGained,
+	}
+	// Só manda a frase de "+N XP" quando houve XP novo: repetir "+0 XP" toda
+	// vez que o usuário desmarca uma etapa vira ruído.
+	if message := service.GrantMessage(xpGained); message != "" {
+		response["xp_message"] = message
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // BuildNewTrail cria uma trilha COMPLETA (trail + itens) remixando o conteúdo
