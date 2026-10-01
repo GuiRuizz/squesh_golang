@@ -110,10 +110,16 @@ func (h *BillingHandler) renewableSubscription(userID uuid.UUID) (*domain.UserSu
 func (h *BillingHandler) oneSubscription(userID uuid.UUID, statusFilter string) (*domain.UserSubscription, error) {
 	now := time.Now()
 
+	// Desempate importante: depois de cancelar, sobram varias assinaturas com
+	// status "canceled" que ainda valem ate o fim do periodo ja pago (a troca
+	// de plano cancela a anterior e abre a nova comecando agora). Entre elas
+	// vence a mais recente, que e a que esta em vigor. Sem esse criterio o
+	// Postgres devolvia uma delas aleatoriamente e o app mostrava ora o plano
+	// antigo, ora o novo, sem explicacao.
 	var sub domain.UserSubscription
 	err := h.DB.Preload("Plan").
 		Where("user_id = ? AND "+statusFilter+" AND renews_at > ?", userID, now).
-		Order("CASE WHEN status = 'active' THEN 0 ELSE 1 END").
+		Order("CASE WHEN status = 'active' THEN 0 ELSE 1 END, started_at DESC, id DESC").
 		First(&sub).Error
 	if err == gorm.ErrRecordNotFound {
 		return nil, nil
