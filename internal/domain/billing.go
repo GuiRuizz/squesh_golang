@@ -17,13 +17,19 @@ type Plan struct {
 	PeriodMonths int       `gorm:"not null;default:1" json:"period_months"`
 	Badge        string    `gorm:"size:20" json:"badge"`
 	// Features é a lista de benefícios exibida no cartão do plano (jsonb).
-	Features    []string  `gorm:"type:jsonb;serializer:json" json:"features"`
-	Highlight   string    `gorm:"size:80" json:"highlight"`
-	IsPopular   bool      `gorm:"default:false" json:"is_popular"`
-	IsActive    bool      `gorm:"default:true" json:"is_active"`
-	SortOrder   int       `gorm:"default:0" json:"sort_order"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Features  []string `gorm:"type:jsonb;serializer:json" json:"features"`
+	Highlight string   `gorm:"size:80" json:"highlight"`
+	IsPopular bool     `gorm:"default:false" json:"is_popular"`
+	IsActive  bool     `gorm:"default:true" json:"is_active"`
+	SortOrder int      `gorm:"default:0" json:"sort_order"`
+	// StripePriceID é o preço correspondente no Stripe (price_xxx). Vazio
+	// enquanto o pagamento não está integrado. Existe desde já para o
+	// cadastro ficar pronto: quando plugar o Stripe é só preencher esta
+	// coluna e trocar a ativação imediata por checkout + webhook. Um plano sem
+	// este id é um plano que ainda não pode ser cobrado online.
+	StripePriceID string    `gorm:"size:120;index" json:"stripe_price_id"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // UserSubscription é o plano que o usuário contratou. Só existe uma assinatura
@@ -44,16 +50,16 @@ type UserSubscription struct {
 // PaymentMethod é um cartão salvo. Guardamos só a bandeira e os 4 últimos
 // dígitos — nunca o número completo.
 type PaymentMethod struct {
-	ID          uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
-	UserID      uuid.UUID `gorm:"type:uuid;not null;index" json:"user_id"`
-	Brand       string    `gorm:"size:30;not null" json:"brand"` // visa | mastercard | elo | amex
-	Last4       string    `gorm:"size:4;not null" json:"last4"`
-	ExpMonth    int       `gorm:"not null" json:"exp_month"`
-	ExpYear     int       `gorm:"not null" json:"exp_year"`
-	HolderName  string    `gorm:"size:100" json:"holder_name"`
-	IsDefault   bool      `gorm:"default:false" json:"is_default"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID         uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	UserID     uuid.UUID `gorm:"type:uuid;not null;index" json:"user_id"`
+	Brand      string    `gorm:"size:30;not null" json:"brand"` // visa | mastercard | elo | amex
+	Last4      string    `gorm:"size:4;not null" json:"last4"`
+	ExpMonth   int       `gorm:"not null" json:"exp_month"`
+	ExpYear    int       `gorm:"not null" json:"exp_year"`
+	HolderName string    `gorm:"size:100" json:"holder_name"`
+	IsDefault  bool      `gorm:"default:false" json:"is_default"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Address é um endereço de entrega salvo no perfil.

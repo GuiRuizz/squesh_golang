@@ -71,8 +71,16 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 		protected := v1.Group("")
 		protected.Use(middleware.AuthMiddleware())
 		{
-			// Loja (Ações do Usuário)
-			protected.POST("/shop/buy", shopHandler.BuyItem)
+			// Loja (Ações do Usuário). O carrinho vira um pedido e o pagamento é
+			// confirmado depois (MarkOrderPaid): nada entra no inventário antes
+			// disso.
+			orders := protected.Group("/shop/orders")
+			{
+				orders.POST("", shopHandler.CreateOrder)
+				orders.GET("", shopHandler.ListMyOrders)
+				orders.GET("/:orderId", shopHandler.GetMyOrder)
+				orders.POST("/:orderId/cancel", shopHandler.CancelOrder)
+			}
 			protected.GET("/shop/inventory", shopHandler.GetUserInventory)
 
 			// Central de Notificações
@@ -87,13 +95,13 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 			// Trilhas & Progresso
 			trails := protected.Group("/trails")
 			{
-				trails.GET("/me", trailHandler.GetMyTrails)              // <--- Novo: todas as trilhas com progresso + limite diário
-			trails.GET("/me/active", trailHandler.GetMyActiveTrail)        // <--- Novo: trilha atual + próxima etapa
+				trails.GET("/me", trailHandler.GetMyTrails)                    // <--- Novo: todas as trilhas com progresso + limite diário
+				trails.GET("/me/active", trailHandler.GetMyActiveTrail)        // <--- Novo: trilha atual + próxima etapa
 				trails.GET("/me/completed", trailHandler.GetMyCompletedTrails) // <--- Novo: trilhas concluídas
 				trails.POST("/generate", trailHandler.GenerateCompleteTrail)   // <--- Novo: gera trilha COMPLETA
 				trails.POST("/:id/generate", trailHandler.GenerateInfiniteItems)
-				trails.POST("/items/:itemId/complete", trailHandler.CompleteTrailItem)  // conclui item SEM etapas internas
-				trails.PATCH("/items/:itemId/steps", trailHandler.ToggleStepCheck)  // marca/desmarca UMA etapa (refeição ou exercício)
+				trails.POST("/items/:itemId/complete", trailHandler.CompleteTrailItem) // conclui item SEM etapas internas
+				trails.PATCH("/items/:itemId/steps", trailHandler.ToggleStepCheck)     // marca/desmarca UMA etapa (refeição ou exercício)
 				// Alias legado: o app anterior chamava /meals (o body aceita meal_index).
 				trails.PATCH("/items/:itemId/meals", trailHandler.ToggleStepCheck)
 			}
@@ -157,6 +165,10 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 				admin.POST("/shop", shopHandler.CreateItem)
 				admin.PUT("/shop/:id", shopHandler.UpdateItem)
 				admin.DELETE("/shop/:id", shopHandler.DeleteItem)
+				// Confirma o pagamento de um pedido e entrega os itens. É o que
+				// fecha o pedido no desenvolvimento; quando o Stripe entrar, o
+				// webhook passa a chamar por dentro o mesmo caminho.
+				admin.POST("/shop/orders/:orderId/pay", shopHandler.MarkOrderPaid)
 
 				// Gerenciamento de Trilhas (Admin)
 				admin.POST("/trails", trailHandler.CreateTrail)

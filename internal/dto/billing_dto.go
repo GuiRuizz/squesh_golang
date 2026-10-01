@@ -19,6 +19,10 @@ type PlanResponseDTO struct {
 	Features     []string  `json:"features"`
 	Highlight    string    `json:"highlight"`
 	IsPopular    bool      `json:"is_popular"`
+	// StripePriceID vem vazio enquanto o Stripe não estiver integrado. Não é
+	// segredo (o app não faz nada com ele hoje) — está aqui para o catálogo
+	// mostrar de cara quais planos já têm preço cadastrado no Stripe.
+	StripePriceID string `json:"stripe_price_id"`
 }
 
 // ---- Assinatura ----
@@ -34,11 +38,11 @@ type SubscriptionResponseDTO struct {
 }
 
 type UserSubscriptionDTO struct {
-	ID         uuid.UUID      `json:"id"`
-	Status     string         `json:"status"`
-	StartedAt  time.Time      `json:"started_at"`
-	RenewsAt   time.Time      `json:"renews_at"`
-	CanceledAt *time.Time     `json:"canceled_at,omitempty"`
+	ID         uuid.UUID       `json:"id"`
+	Status     string          `json:"status"`
+	StartedAt  time.Time       `json:"started_at"`
+	RenewsAt   time.Time       `json:"renews_at"`
+	CanceledAt *time.Time      `json:"canceled_at,omitempty"`
 	Plan       PlanResponseDTO `json:"plan"`
 	// IsCurrent = o plano ainda vale agora. Uma assinatura cancelada continua
 	// valendo até RenewsAt, então o app não pode usar Status == "active" para

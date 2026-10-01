@@ -71,8 +71,28 @@ func InitDB() *gorm.DB {
 
 	fmt.Println("Conexão e AutoMigrate do [squesh_golang] executados com sucesso!")
 
-	// Catálogo de planos: idempotente, só cria o que falta.
+	// shop_items mudou de price (reais em float) para price_cents (centavos),
+	// o mesmo formato dos planos. O AutoMigrate criou a coluna nova, então
+	// agora é só converter o que existia e descartar a antiga — o app já só
+	// lê price_cents.
+	if err := db.Exec(`DO $$
+	BEGIN
+		IF EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'shop_items' AND column_name = 'price'
+		) THEN
+			UPDATE shop_items
+			SET price_cents = ROUND(price * 100)::int
+			WHERE price_cents = 0 AND price IS NOT NULL;
+			ALTER TABLE shop_items DROP COLUMN price;
+		END IF;
+	END $$;`).Error; err != nil {
+		log.Fatalf("Erro ao migrar shop_items.price para price_cents: %v", err)
+	}
+
+	// Catálogo: idempotente, só cria o que falta.
 	seedPlans(db)
+	seedShopItems(db)
 
 	return db
 }

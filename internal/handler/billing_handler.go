@@ -48,16 +48,17 @@ func planDTO(p domain.Plan) dto.PlanResponseDTO {
 		features = []string{}
 	}
 	return dto.PlanResponseDTO{
-		ID:           p.ID,
-		Name:         p.Name,
-		Slug:         p.Slug,
-		Description:  p.Description,
-		PriceCents:   p.PriceCents,
-		PeriodMonths: p.PeriodMonths,
-		Badge:        p.Badge,
-		Features:     features,
-		Highlight:    p.Highlight,
-		IsPopular:    p.IsPopular,
+		ID:            p.ID,
+		Name:          p.Name,
+		Slug:          p.Slug,
+		Description:   p.Description,
+		PriceCents:    p.PriceCents,
+		PeriodMonths:  p.PeriodMonths,
+		Badge:         p.Badge,
+		Features:      features,
+		Highlight:     p.Highlight,
+		IsPopular:     p.IsPopular,
+		StripePriceID: p.StripePriceID,
 	}
 }
 
