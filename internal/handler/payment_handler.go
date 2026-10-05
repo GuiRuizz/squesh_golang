@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 
 	"squesh_golang/internal/dto"
@@ -199,6 +200,11 @@ func (h *PaymentHandler) Webhook(c *gin.Context) {
 
 	event, err := h.Pay.VerifyWebhook(payload, c.GetHeader("Stripe-Signature"))
 	if err != nil {
+		// O motivo vai para o log porque um 400 sem explicação é indistinguível
+		// de evento nenhum: segredo trocado, evento reenviado fora da janela de
+		// tolerância e corpo adulterado são falhas diferentes com consertos
+		// diferentes. A resposta continua genérica de propósito.
+		log.Printf("webhook recusado: %v (header=%q, corpo=%d bytes)", err, c.GetHeader("Stripe-Signature"), len(payload))
 		// 400 e não 401/403: um corpo com assinatura inválida é malformado do
 		// ponto de vista do endpoint. O mais importante é NÃO processar nada.
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Assinatura do webhook inválida"})

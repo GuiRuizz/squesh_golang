@@ -258,9 +258,15 @@ func (s *PaymentService) CreateOrderPaymentIntent(orderID string, userID string)
 		Amount:   stripe.Int64(int64(order.TotalCents)),
 		Currency: stripe.String(s.currency),
 		Customer: stripe.String(customerID),
-		AutomaticPaymentMethods: &stripe.PaymentIntentCreateAutomaticPaymentMethodsParams{
-			Enabled: stripe.Bool(true),
-		},
+		// Só cartão, e NÃO automatic_payment_methods.
+		//
+		// O automatic_payment_methods deixa a Stripe aceitar tudo que o Dashboard
+		// tem ligado, e numa conta BR isso inclui Boleto, Pix e OXXO. Os que
+		// redirecionam o pagador exigem return_url, e sem ela a confirmação
+		// volta com "you must provide a return_url" — o app que só desenha
+		// CardFormField não tem para onde redirecionar. Fixar payment_method_types
+		// deixa o Intent cartão puro, que é o que o app sabe cobrar.
+		PaymentMethodTypes: stripe.StringSlice([]string{"card"}),
 		// O metadata é o elo entre o painel da Stripe e este banco: o webhook
 		// descobre o pedido por aqui, sem depender de coluna sincronizada.
 		Metadata: map[string]string{
