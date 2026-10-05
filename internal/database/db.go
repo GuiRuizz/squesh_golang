@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"squesh_golang/internal/domain"
 
@@ -23,7 +24,7 @@ func InitDB() *gorm.DB {
 		host, user, password, dbname, port,
 	)
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	db, err := openWithRetry(dsn)
 	if err != nil {
 		log.Fatalf("Erro ao conectar no banco via GORM: %v", err)
 	}
@@ -95,6 +96,48 @@ func InitDB() *gorm.DB {
 	seedShopItems(db)
 
 	return db
+}
+
+// openWithRetry espera o Postgres ficar pronto em vez de desistir no primeiro erro.
+//
+// O compose sobe a API e o banco ao mesmo tempo, e logo depois de reiniciar o
+// Docker Desktop o Postgres ainda responde "the database system is starting
+// up". Antes desta espera a API morria no primeiro boot e ficava assim: o Air
+// não relança o binário depois de um crash em runtime (ele espera mudança em
+// arquivo .go), e como o Air é o PID 1 o container continuava "Up" sem nenhum
+// processo escutando — o Docker nunca via que precisava reiniciar.
+func openWithRetry(dsn string) (*gorm.DB, error) {
+	const maxAttempts = 30
+
+	delay := time.Second
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+		if err != nil {
+			lastErr = err
+		} else {
+			// gorm.Open no Postgres pode passar sem tocar no socket; o ping
+			// garante que a primeira query de verdade (a migração logo abaixo)
+			// não seja a primeira a bater num banco ainda subindo.
+			sqlDB, dbErr := db.DB()
+			if dbErr != nil {
+				lastErr = dbErr
+			} else if pingErr := sqlDB.Ping(); pingErr != nil {
+				lastErr = pingErr
+			} else {
+				return db, nil
+			}
+		}
+
+		fmt.Printf("Banco indisponivel (tentativa %d/%d): %v\n", attempt, maxAttempts, lastErr)
+		time.Sleep(delay)
+		if delay < 10*time.Second {
+			delay *= 2
+		}
+	}
+
+	return nil, lastErr
 }
 
 func getEnv(key, fallback string) string {

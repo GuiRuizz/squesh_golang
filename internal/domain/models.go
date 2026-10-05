@@ -23,5 +23,6 @@ func GetModels() []interface{} {
 		&PaymentMethod{},
 		&Address{},
 		&XPEvent{},
+		&StripeEvent{},
 	}
 }

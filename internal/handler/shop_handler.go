@@ -17,11 +17,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// errOrderAlreadyConfirmed marca "outra requisição confirmou este pedido
-// primeiro". Não dá para usar gorm.ErrInvalidTransaction: o GORM entra em panic
-// com esse erro dentro de uma transação.
-var errOrderAlreadyConfirmed = errors.New("pedido ja confirmado por outra requisicao")
-
 type ShopHandler struct {
 	DB                  *gorm.DB
 	NotificationService *service.NotificationService
@@ -410,82 +405,37 @@ func (h *ShopHandler) CancelOrder(c *gin.Context) {
 
 // MarkOrderPaid confirma o pagamento e entrega os itens no inventário (Admin).
 //
-// Este é o único caminho que gera inventário, e o mesmo que o webhook do Stripe
-// vai usar quando o pagamento existir de verdade: pagamento confirmado uma vez
-// só (segunda chamada devolve 409) e entrega dentro da mesma transação.
+// Caminho manual, para pagamento feito fora do app (transferência, combine
+// com o admin). A entrega em si NÃO está aqui: é service.FulfillOrderPaid, o mesmo
+// que o webhook do Stripe chama quando o pagamento chega pelo app. Um único
+// caminho de entrega significa que os dois nunca divergem sobre quando o item
+// entra no inventário.
 func (h *ShopHandler) MarkOrderPaid(c *gin.Context) {
 	orderID, ok := uuidParam(c, "orderId", "ID de pedido inválido")
 	if !ok {
 		return
 	}
 
-	var order domain.ShopOrder
-	if err := h.DB.Preload("Items").First(&order, "id = ?", orderID).Error; err != nil {
+	order, err := service.FulfillOrderPaid(h.DB, h.NotificationService, orderID)
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "Pedido não encontrado"})
 		return
-	}
-	if order.IsPaid() {
+	case errors.Is(err, service.ErrOrderAlreadyPaid):
+		// Já confirmado (por este endpoint ou pelo webhook). 409 e não 200:
+		// quem pediu foi avisado de que não há o que fazer, e não recebe um
+		// "ok" que sugere que acabou de ganhar o item de novo.
 		c.JSON(http.StatusConflict, gin.H{"error": "Este pedido já está pago"})
 		return
-	}
-	if !order.IsPending() {
+	case errors.Is(err, service.ErrOrderNotPending):
 		c.JSON(http.StatusConflict, gin.H{"error": "Este pedido foi cancelado"})
 		return
-	}
-
-	now := time.Now()
-	err := h.DB.Transaction(func(tx *gorm.DB) error {
-		// Trava a linha: duas confirmações simultaneas não podem passar
-		// juntas e entregar o item em dobro.
-		res := tx.Model(&domain.ShopOrder{}).
-			Where("id = ? AND status = ?", order.ID, "pending").
-			Updates(map[string]any{
-				"status":     "paid",
-				"paid_at":    now,
-				"updated_at": now,
-			})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			// Outra requisição já confirmou entre o SELECT e o UPDATE.
-			return errOrderAlreadyConfirmed
-		}
-
-		inventory := make([]domain.UserInventory, 0, len(order.Items))
-		for _, line := range order.Items {
-			for i := 0; i < line.Quantity; i++ {
-				inventory = append(inventory, domain.UserInventory{
-					UserID: order.UserID,
-					ItemID: line.ItemID,
-				})
-			}
-		}
-		if len(inventory) == 0 {
-			return nil
-		}
-		return tx.Create(&inventory).Error
-	})
-	if err == errOrderAlreadyConfirmed {
-		c.JSON(http.StatusConflict, gin.H{"error": "Este pedido foi confirmado em outro pedido"})
-		return
-	}
-	if err != nil {
+	case err != nil:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao confirmar o pagamento"})
 		return
 	}
 
-	order.Status = "paid"
-	order.PaidAt = &now
-
-	// Categoria "shop": se o usuário desligou as novidades da loja, o serviço
-	// de notificações descarta a mensagem.
-	if h.NotificationService != nil {
-		_ = h.NotificationService.CreateNotification(order.UserID, "Pedido confirmado!",
-			"Recebemos o pagamento do seu pedido. Os itens já estão no seu inventário.", "shop")
-	}
-
-	c.JSON(http.StatusOK, orderDTO(order))
+	c.JSON(http.StatusOK, orderDTO(*order))
 }
 
 // ownedOrder carrega o pedido da rota garantindo que é do usuário logado. Já
@@ -520,7 +470,6 @@ func orderDTO(order domain.ShopOrder) dto.ShopOrderResponseDTO {
 		ID:          order.ID,
 		Status:      order.Status,
 		TotalCents:  order.TotalCents,
-		CheckoutURL: order.CheckoutURL,
 		PaidAt:      order.PaidAt,
 		CanceledAt:  order.CanceledAt,
 		Items:       items,

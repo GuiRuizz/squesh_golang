@@ -1,5 +1,7 @@
 package dto
 
+import "squesh_golang/internal/domain"
+
 type CreateTrailDTO struct {
 	Title       string `json:"title" binding:"required"`
 	Description string `json:"description"`
@@ -8,10 +10,11 @@ type CreateTrailDTO struct {
 }
 
 type CreateTrailItemDTO struct {
-	Title       string `json:"title" binding:"required"`
-	Description string `json:"description"`
-	Order       int    `json:"order" binding:"required"`
-	Value       string `json:"value"`
+	Title       string            `json:"title" binding:"required"`
+	Description string            `json:"description"`
+	Order       int               `json:"order" binding:"required"`
+	Value       string            `json:"value"`
+	Steps       []domain.StepSpec `json:"steps"`
 }
 
 // GenerateTrailDTO gera uma trilha COMPLETA a partir do conteúdo existente.

@@ -34,13 +34,15 @@ type ShopItem struct {
 type ShopOrder struct {
 	ID     uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
 	UserID uuid.UUID `gorm:"type:uuid;not null;index" json:"user_id"`
+	User   User      `gorm:"foreignKey:UserID" json:"-"`
 	// Status: pending (aguardando pagamento) | paid | canceled.
 	Status     string `gorm:"size:20;default:'pending';not null" json:"status"`
 	TotalCents int    `gorm:"not null" json:"total_cents"`
-	// CheckoutURL é onde o app manda o usuário pagar. Vazio enquanto o
-	// provedor de pagamento não está integrado — nesse caso a tela mostra que
-	// o pagamento ainda não está disponível em vez de abrir uma tela vazia.
-	CheckoutURL string `gorm:"type:text" json:"checkout_url"`
+	// CheckoutURL saiu: o pagamento acontece no app (Payment Intent + Stripe
+	// Elements), não num redirect. A coluna continua no banco — removê-la
+	// seria migração sem ganho —, mas nada a escreve nem a lê. O que liga o
+	// pedido ao provedor são os dois campos abaixo.
+	CheckoutURL string `gorm:"type:text" json:"-"`
 	// PaymentProvider ("stripe") e ExternalPaymentID ligam o pedido ao
 	// provedor. Vazios agora, preenchidos no checkout de verdade.
 	PaymentProvider   string          `gorm:"size:20" json:"payment_provider"`

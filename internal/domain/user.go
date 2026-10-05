@@ -18,6 +18,11 @@ type User struct {
 	StreakCount    int        `gorm:"default:0;not null" json:"streak"`
 	LastActiveDate *time.Time `json:"last_active_date,omitempty"`
 	Points         int        `gorm:"default:0;not null" json:"points"`
+	// StripeCustomerID é o cliente (cus_xxx) no Stripe. Fica vazio até o
+	// primeiro pagamento e é criado uma única vez: as cobranças seguintes
+	// reaproveitam o mesmo cliente, e é nele que o cartão fica guardado para a
+	// renovação da assinatura.
+	StripeCustomerID string `gorm:"size:120;index" json:"-"`
 	// Preferências de notificação em jsonb. O campo não aparece no JSON do
 	// usuário: quem consome é o /users/me, via UserPreferencesResponseDTO.
 	Preferences UserPreferences `gorm:"type:jsonb;serializer:json" json:"-"`

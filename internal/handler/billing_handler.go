@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -15,13 +16,19 @@ import (
 )
 
 // BillingHandler cuida de planos, assinatura, cartões e endereços.
+//
+// Pay entra aqui só para o CANCELAMENTO: é preciso avisar a Stripe para não
+// gerar a próxima cobrança, e essa é a única parte desta tela que depende
+// do provedor. A contratação é do PaymentHandler, porque só o webhook pode
+// ativar a assinatura depois do pagamento.
 type BillingHandler struct {
 	DB    *gorm.DB
 	Notif *service.NotificationService
+	Pay   *service.PaymentService
 }
 
-func NewBillingHandler(db *gorm.DB, notif *service.NotificationService) *BillingHandler {
-	return &BillingHandler{DB: db, Notif: notif}
+func NewBillingHandler(db *gorm.DB, notif *service.NotificationService, pay *service.PaymentService) *BillingHandler {
+	return &BillingHandler{DB: db, Notif: notif, Pay: pay}
 }
 
 // ---------------------------------------------------------------- planos
@@ -60,6 +67,59 @@ func planDTO(p domain.Plan) dto.PlanResponseDTO {
 		IsPopular:     p.IsPopular,
 		StripePriceID: p.StripePriceID,
 	}
+}
+
+// SetPlanStripePrice liga um plano ao price_xxx do Stripe (Admin).
+//
+// O price_xxx nasce no painel do Stripe — é criado lá, na tela de produtos — e
+// precisa ser colado em algum lugar. É o único campo do plano que vem de fora,
+// por isso ganha uma rota própria em vez de um UPDATE genérico.
+//
+// O preço em CENTAVOS do banco e o preço do price_xxx precisam bater. O
+// servidor não descobre isso sozinho: se divergirem, a vitrine mostra um valor
+// e a Stripe cobra outro, e o usuário só descobre no extrato. A conferência
+// abaixo exige que o servidor consiga LER o price_xxx — o que também pega o
+// erro mais comum aqui, que é colar um price de outro ambiente (teste no
+// banco de produção) ou o id do produto em vez do do preço.
+func (h *BillingHandler) SetPlanStripePrice(c *gin.Context) {
+	planID, ok := uuidParam(c, "planId", "ID de plano inválido")
+	if !ok {
+		return
+	}
+
+	var input dto.SetPlanPriceDTO
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Informe o stripe_price_id (price_xxx)"})
+		return
+	}
+
+	var plan domain.Plan
+	if err := h.DB.First(&plan, "id = ?", planID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Plano não encontrado"})
+		return
+	}
+
+	if err := h.Pay.ValidatePrice(input.StripePriceID, plan.PriceCents, plan.Name); err != nil {
+		switch {
+		case errors.Is(err, service.ErrPaymentNotConfigured):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "O pagamento ainda não está disponível neste ambiente"})
+		case errors.Is(err, service.ErrPriceMismatch):
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"error": "O valor do price no Stripe não bate com o preço do plano no banco. Confira os dois antes de ligar.",
+			})
+		default:
+			c.JSON(http.StatusBadGateway, gin.H{"error": "A Stripe recusou este price_xxx: confira se ele existe neste ambiente"})
+		}
+		return
+	}
+
+	plan.StripePriceID = input.StripePriceID
+	if err := h.DB.Save(&plan).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao salvar o preço do plano"})
+		return
+	}
+
+	c.JSON(http.StatusOK, planDTO(plan))
 }
 
 // ---------------------------------------------------------------- assinatura
@@ -210,6 +270,25 @@ func (h *BillingHandler) CancelSubscription(c *gin.Context) {
 	if sub == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Voce nao tem assinatura ativa"})
 		return
+	}
+
+	// A Stripe é avisada ANTES de mexer no banco, e falha aqui devolve erro
+	// sem cancelar nada. O inverso — marcar cancelado no banco e falhar na
+	// Stripe — deixaria o usuário achando que cancelou enquanto a próxima
+	// cobrança saía do cartão dele.
+	//
+	// Uma assinatura sem StripeSubscriptionID (plano seedado no banco, sem
+	// preço cadastrado) não tem o que avisar: cancela só no local, como
+	// sempre.
+	if sub.StripeSubscriptionID != "" {
+		if err := h.Pay.CancelSubscriptionWithStripe(sub.StripeSubscriptionID); err != nil {
+			if !errors.Is(err, service.ErrPaymentNotConfigured) {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "Nao foi possivel cancelar no processador de pagamento"})
+				return
+			}
+			// Sem chave configurada a assinatura nunca foi cobrada pela
+			// Stripe, então cancelar no banco é a única coisa a fazer.
+		}
 	}
 
 	now := time.Now()

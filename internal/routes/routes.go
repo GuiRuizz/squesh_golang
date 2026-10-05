@@ -16,6 +16,9 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 
 	// Services
 	notifService := service.NewNotificationService(db)
+	// A chave do Stripe pode faltar: o serviço funciona desabilitado e as
+	// rotas de cobrança respondem 503, sem derrubar loja e planos.
+	paymentService := service.NewPaymentService(db, notifService)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(db)
@@ -24,10 +27,12 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 	userHandler := handler.NewUserHandler(db)
 	followHandler := handler.NewFollowHandler(db)
 	shopHandler := handler.NewShopHandler(db, notifService)
-	billingHandler := handler.NewBillingHandler(db, notifService)
+	billingHandler := handler.NewBillingHandler(db, notifService, paymentService)
+	adminHandler := handler.NewAdminHandler(db)
 	notificationHandler := handler.NewNotificationHandler(db)
 	uploadHandler := handler.NewUploadHandler(store)
 	arenaHandler := handler.NewArenaHandler(db)
+	paymentHandler := handler.NewPaymentHandler(db, paymentService)
 
 	v1 := r.Group("/api/v1")
 	{
@@ -59,6 +64,15 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 		// Vitrine de planos (público: o app mostra os preços antes do login)
 		v1.GET("/plans", billingHandler.ListPlans)
 
+		// Chave pública do Stripe (público: o app monta o formulário de
+		// cartão antes mesmo do login, e a chave não é segredo).
+		v1.GET("/payments/config", paymentHandler.GetConfig)
+
+		// Webhook do Stripe. Fica aqui fora do grupo protegido de propósito:
+		// a Stripe não manda token nosso, ela ASSINA o corpo. A
+		// autenticação é a conferência do header Stripe-Signature.
+		v1.POST("/webhooks/stripe", paymentHandler.Webhook)
+
 		// Upload de arquivos: o app faz o PUT direto na URL assinada
 		// (a assinatura na query string é a autenticação — sem JWT aqui).
 		v1.PUT("/uploads/*key", uploadHandler.Upload)
@@ -81,6 +95,9 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 				orders.GET("", shopHandler.ListMyOrders)
 				orders.GET("/:orderId", shopHandler.GetMyOrder)
 				orders.POST("/:orderId/cancel", shopHandler.CancelOrder)
+				// Abre a cobrança do pedido e devolve o segredo para o app
+				// confirmar o cartão. O preço vem do pedido, nunca do app.
+				orders.POST("/:orderId/pay", paymentHandler.PayOrder)
 			}
 			protected.GET("/shop/inventory", shopHandler.GetUserInventory)
 
@@ -130,8 +147,15 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 
 			// Assinatura, formas de pagamento e endereços
 			users.GET("/me/subscription", billingHandler.GetMySubscription)
-			users.POST("/me/subscription", billingHandler.Subscribe)
+			// Contratar vai para o PaymentHandler: a assinatura só é ativada
+			// pelo webhook depois que o cartão é confirmado. Cancelar fica
+			// no BillingHandler, que também avisa a Stripe para não haver
+			// próxima cobrança.
+			users.POST("/me/subscription", paymentHandler.Subscribe)
 			users.DELETE("/me/subscription", billingHandler.CancelSubscription)
+			// Página de gerenciamento da Stripe: trocar cartão, ver faturas e
+			// cancelar sem sair do app.
+			users.POST("/me/subscription/portal", paymentHandler.CreatePortalSession)
 			{
 				users.GET("/me/payment-methods", billingHandler.ListPaymentMethods)
 				users.POST("/me/payment-methods", billingHandler.CreatePaymentMethod)
@@ -175,10 +199,23 @@ func SetupRouter(db *gorm.DB, store storage.Storage) *gin.Engine {
 				admin.POST("/shop", shopHandler.CreateItem)
 				admin.PUT("/shop/:id", shopHandler.UpdateItem)
 				admin.DELETE("/shop/:id", shopHandler.DeleteItem)
-				// Confirma o pagamento de um pedido e entrega os itens. É o que
-				// fecha o pedido no desenvolvimento; quando o Stripe entrar, o
-				// webhook passa a chamar por dentro o mesmo caminho.
-				admin.POST("/shop/orders/:orderId/pay", shopHandler.MarkOrderPaid)
+				admin.GET("/admin/shop", adminHandler.ListShopItems)
+				admin.GET("/admin/overview", adminHandler.Overview)
+				admin.GET("/admin/orders", adminHandler.ListOrders)
+				admin.GET("/admin/subscriptions", adminHandler.ListSubscriptions)
+
+				// Confirmação MANUAL de um pedido (transferência, combine),
+				// para quando o pagamento não passou pelo app. Mora sob
+				// /admin/ e não em /shop/orders/:id/pay de propósito: esse
+				// caminho é do app e significa "me dê o segredo para cobrar",
+				// não "confirme que já foi pago". Registrar os dois no mesmo
+				// método e caminho faria o Gin pular no boot.
+				admin.POST("/admin/orders/:orderId/pay", shopHandler.MarkOrderPaid)
+
+				// Liga um plano ao price_xxx criado no painel do Stripe.
+				// É o único dado do plano que nasce FORA do app, então precisa
+				// de uma rota para ser colado.
+				admin.PUT("/admin/plans/:planId/stripe-price", billingHandler.SetPlanStripePrice)
 
 				// Gerenciamento de Trilhas (Admin)
 				admin.POST("/trails", trailHandler.CreateTrail)

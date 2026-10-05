@@ -41,12 +41,31 @@ services:
       # nos testes com celular físico aponte para o IP LAN do PC)
       - STORAGE_PUBLIC_BASE_URL=${STORAGE_PUBLIC_BASE_URL}
       - UPLOAD_DIR=uploads
+      # Stripe. Vazio = pagamento desativado (só as rotas de cobrança
+      # respondem 503). As chaves ficam no .env da RAIZ do projeto, nunca no
+      # repositório. STRIPE_SECRET_KEY é segredo de verdade: a Stripe a
+      # revoga se ela aparecer em algum lugar público.
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - STRIPE_CURRENCY=${STRIPE_CURRENCY:-brl}
       # Fuso horário: o limite diário (1 conclusão/dia por tipo) usa o "dia"
       # do servidor. Defina o seu fuso local para os dias baterem com o App.
       - TZ=America/Sao_Paulo
     depends_on:
       postgres:
         condition: service_healthy # Aguarda o PostgreSQL estar totalmente pronto
+    # Sem isto o container aparece como "Up" mesmo com a API morta dentro: o Air
+    # é o PID 1 e não relança o binário depois de um crash, então o processo
+    # Go pode morrer e o Docker continua achando que está tudo bem. O
+    # healthcheck deixa a falha visível em `docker ps` em vez de virar
+    # "sem conexão com o servidor" no celular.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/v1/payments/config >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 60s # o primeiro build do Air leva ~30s
     networks:
       - squesh_network
 

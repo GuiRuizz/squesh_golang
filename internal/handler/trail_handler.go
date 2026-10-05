@@ -155,6 +155,7 @@ func (h *TrailHandler) AddItemToTrail(c *gin.Context) {
 		Description: input.Description,
 		Order:       input.Order,
 		Value:       input.Value,
+		Steps:       input.Steps,
 	}
 
 	if err := h.DB.Create(&item).Error; err != nil {

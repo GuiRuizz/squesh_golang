@@ -68,7 +68,9 @@ type ShopOrderResponseDTO struct {
 	ID          uuid.UUID          `json:"id"`
 	Status      string             `json:"status"` // pending | paid | canceled
 	TotalCents  int                `json:"total_cents"`
-	CheckoutURL string             `json:"checkout_url"`
+	// NÃO há checkout_url: o pagamento é feito dentro do app, e o segredo da
+	// cobrança vem de POST /shop/orders/:id/pay (ver OrderPaymentDTO). Um
+	// campo de URL aqui seria sempre vazio e o app aprenderia a oferecê-lo.
 	PaidAt      *time.Time         `json:"paid_at"`
 	CanceledAt  *time.Time         `json:"canceled_at"`
 	Items       []ShopOrderItemDTO `json:"items"`

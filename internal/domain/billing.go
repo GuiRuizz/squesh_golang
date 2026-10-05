@@ -37,14 +37,20 @@ type Plan struct {
 type UserSubscription struct {
 	ID         uuid.UUID  `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
 	UserID     uuid.UUID  `gorm:"type:uuid;not null;index" json:"user_id"`
+	User       User       `gorm:"foreignKey:UserID" json:"-"`
 	PlanID     uuid.UUID  `gorm:"type:uuid;not null" json:"plan_id"`
 	Plan       Plan       `gorm:"foreignKey:PlanID" json:"plan"`
-	Status     string     `gorm:"size:20;default:'active';not null" json:"status"` // active | canceled
+	Status     string     `gorm:"size:20;default:'active';not null" json:"status"` // pending | active | canceled
 	StartedAt  time.Time  `json:"started_at"`
 	RenewsAt   time.Time  `json:"renews_at"`
 	CanceledAt *time.Time `json:"canceled_at,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	// StripeSubscriptionID amarra a linha ao objeto de assinatura do Stripe
+	// (sub_xxx). É por ele que o webhook sabe qual linha atualizar, inclusive
+	// nas renovações (que não criam linha nova). Vazio numa assinatura criada
+	// direto no banco (ver seed em db.go), que é o caso de plano sem Stripe.
+	StripeSubscriptionID string    `gorm:"size:120;index" json:"-"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // PaymentMethod é um cartão salvo. Guardamos só a bandeira e os 4 últimos
